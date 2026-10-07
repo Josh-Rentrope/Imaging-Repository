@@ -22,9 +22,10 @@ cd apps/web && npm run typecheck
 
 ```
 contracts/          CaptureBundle + results JSON schemas — the shell⇄core seam
-apps/api/           FastAPI. InferenceBackend protocol + fixture/stub implementations
-  app/pipeline/     interfaces.py, fixture.py, ondevice.py (stub), server.py (loader only)
+apps/api/           FastAPI. InferenceBackend protocol + implementations
+  app/pipeline/     interfaces.py (Stage/Op), fixture.py, ondevice.py, server.py (loader)
   app/dicom/        minimal.py — narrow, dependency-free DICOM header reader
+  recordings/       optional per-stage responses, replayed in place of generated output
   tests/            smoke tests asserting the safety-critical behaviours
 apps/web/           Vite + React + TS. Transition layer in src/transitions/
   src/transitions/  named page-transition presets (fade, dissolve, wipes, rise)

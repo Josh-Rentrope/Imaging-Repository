@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI):
     app.state.storage = LocalStorage(settings.data_dir)
     app.state.registry = BackendRegistry(
         storage=app.state.storage,
-        fixtures_dir=settings.fixtures_dir,
+        recordings_dir=settings.recordings_dir,
         preference=settings.backend,
     )
     app.state.job_store = JobStore(app.state.registry)

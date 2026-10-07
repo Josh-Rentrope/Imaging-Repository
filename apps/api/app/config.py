@@ -15,7 +15,8 @@ class Settings(BaseModel):
 
     data_dir: Path = API_DIR / ".data"
 
-    fixtures_dir: Path = API_DIR / "fixtures"
+    #: Optional stage recordings, replayed in place of generated output.
+    recordings_dir: Path = API_DIR / "recordings"
 
     backend: str = "auto"
 
@@ -32,7 +33,7 @@ class Settings(BaseModel):
 def get_settings() -> Settings:
     return Settings(
         data_dir=Path(os.environ.get("BONE_VIEWER_DATA_DIR", API_DIR / ".data")),
-        fixtures_dir=Path(os.environ.get("BONE_VIEWER_FIXTURES_DIR", API_DIR / "fixtures")),
+        recordings_dir=Path(os.environ.get("BONE_VIEWER_RECORDINGS_DIR", API_DIR / "recordings")),
         backend=os.environ.get("BONE_VIEWER_BACKEND", "auto"),
         cors_origins=os.environ.get("BONE_VIEWER_CORS_ORIGINS", "*"),
         enable_diagnostic_tasks=_truthy(os.environ.get("BONE_VIEWER_ENABLE_DIAGNOSTIC", "")),

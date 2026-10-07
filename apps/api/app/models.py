@@ -1,8 +1,8 @@
 """API request/response models.
 
-Contract envelope models (CaptureBundle, ResultEnvelope) are validated against
-contracts/*.schema.json in tests rather than duplicated here -- one source of
-truth. These are the transport-level shapes around them.
+The contract envelopes (CaptureBundle, ResultEnvelope) are validated against
+contracts/*.schema.json rather than duplicated here. These are the transport
+shapes around them.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from .pipeline import BackendName, Task
+from .pipeline import Stage
 
 
 class JobStatus(StrEnum):
@@ -21,30 +21,27 @@ class JobStatus(StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
-    REJECTED = "rejected"  # quality gate refused it; not an error
+    REJECTED = "rejected"  # refused before execution, e.g. by entitlement
 
 
 class JobCreate(BaseModel):
-    task: Task
+    stages: list[Stage] = Field(min_length=1)
     capture: dict[str, Any] | None = None
-    params: dict[str, Any] = Field(default_factory=dict)
-    backend: BackendName | None = Field(
+    backend: str | None = Field(
         default=None,
-        description="Force a backend. Server-side is the production default; "
-        "leave unset to let the registry negotiate.",
+        description="Force a backend by id. Leave unset to let the registry negotiate.",
     )
     allow_diagnostic: bool = Field(
         default=False,
-        description="Must be true for diagnostic tasks, and the server must also have "
-        "BONE_VIEWER_ENABLE_DIAGNOSTIC set. Two switches, deliberately.",
+        description="Required for diagnostic operations, in addition to the server setting.",
     )
 
 
 class Job(BaseModel):
     job_id: str
     status: JobStatus
-    task: Task
-    backend: BackendName | None = None
+    ops: list[str]
+    backend: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     finished_at: datetime | None = None
     result: dict[str, Any] | None = None
@@ -54,11 +51,10 @@ class Job(BaseModel):
 
 class DicomInstance(BaseModel):
     #: DICOM SOP Instance UID (0008,0018), as read from the file. May be empty
-    #: for a headerless upload.
+    #: for a file whose header could not be parsed.
     sop_instance_uid: str = ""
     file_name: str
-    #: Storage ref for the stored instance. The viewer fetches by this, never by
-    #: constructing a path.
+    #: Storage ref. Callers fetch by this rather than constructing a path.
     ref: str = ""
     bytes: int
     rows: int | None = None
@@ -73,8 +69,7 @@ class DicomSeries(BaseModel):
     instances: list[DicomInstance] = Field(default_factory=list)
     instance_count: int = 0
     bytes_total: int = 0
-    #: True when the upload carried no parseable DICOM headers and the files were
-    #: accepted as an opaque blob. The viewer must say so rather than render blank.
+    #: True when no file in the upload carried a parseable header.
     headerless: bool = False
 
 
