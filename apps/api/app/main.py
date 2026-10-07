@@ -99,11 +99,22 @@ def create_app() -> FastAPI:
     # means a preflight is answered without touching a viewer, and a failure
     # inside the viewer still comes back with CORS headers instead of surfacing
     # in the browser as an opaque cross-origin error.
+    #
+    # Credentials are allowed only when specific origins are named, because `*`
+    # and credentials are contradictory: a browser refuses a wildcard origin on a
+    # credentialed request. Emitting both would produce a configuration that
+    # looks right, answers the preflight, and has the browser silently discard the
+    # viewer cookie on the way back -- and the cookie is the whole of the
+    # separation, so that failure is total and invisible. Same-origin requests do
+    # not consult CORS at all, which is why the local dev proxy is unaffected
+    # either way.
+    named_origins = "*" not in settings.cors_origin_list
+
     app.add_middleware(ViewerMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
-        allow_credentials=False,
+        allow_credentials=named_origins,
         allow_methods=["*"],
         allow_headers=["*"],
     )

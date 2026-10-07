@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from helpers import RGBD_CAPTURE, run, settle  # noqa: E402  (tests/ is on sys.path)
 
 from app.config import get_settings
 from app.jobs import JobStore
+from app.main import create_app
 from app.models import JobCreate, JobStatus
 from app.pipeline import BackendRegistry, Stage
 from app.sources import SourceStore
@@ -331,6 +333,62 @@ def test_a_local_store_is_handed_over_rather_than_copied(tmp_path):
     with store.materialize("s1") as directory:
         assert (directory / "a.dcm").read_bytes() == b"AAA"
         assert "bone-viewer-source-" not in str(directory), "a local store was copied"
+
+
+# ── credentials, which is what makes the cookie usable cross-origin ─────────
+
+
+def _cors_app(tmp_path, monkeypatch, origins: str):
+    monkeypatch.setenv("BONE_VIEWER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("BONE_VIEWER_RECORDINGS_DIR", str(tmp_path / "recordings"))
+    monkeypatch.setenv("BONE_VIEWER_MULTI_TENANT", "0")
+    monkeypatch.setenv("BONE_VIEWER_CORS_ORIGINS", origins)
+    get_settings.cache_clear()
+    return create_app()
+
+
+def test_a_named_origin_is_allowed_to_send_credentials(tmp_path, monkeypatch):
+    """The deployed topology is two origins, so the cookie only travels if the
+    response says credentialed requests are allowed.
+
+    Without this header the browser discards the viewer cookie on the way back.
+    Nothing errors: the API issues a cookie, the request succeeds, and the next
+    request arrives without it -- so every artifact read 404s and every listing
+    comes back empty, with nothing in any log to say why. That is the failure
+    this test exists to make impossible.
+    """
+    app = _cors_app(tmp_path, monkeypatch, "https://web.example.com")
+    with TestClient(app) as client:
+        response = client.options(
+            "/jobs",
+            headers={
+                "Origin": "https://web.example.com",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://web.example.com"
+    assert response.headers.get("access-control-allow-credentials") == "true"
+    get_settings.cache_clear()
+
+
+def test_a_wildcard_origin_does_not_claim_credentials(tmp_path, monkeypatch):
+    """`*` and credentials are contradictory -- a browser rejects the pairing --
+    so with a wildcard the header is correctly absent rather than wrong."""
+    app = _cors_app(tmp_path, monkeypatch, "*")
+    with TestClient(app) as client:
+        response = client.options(
+            "/jobs",
+            headers={
+                "Origin": "https://web.example.com",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+
+    assert response.headers["access-control-allow-origin"] == "*"
+    assert "access-control-allow-credentials" not in response.headers
+    get_settings.cache_clear()
 
 
 # ── a store that stops answering ────────────────────────────────────────────
