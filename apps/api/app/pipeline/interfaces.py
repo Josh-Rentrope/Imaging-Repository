@@ -23,6 +23,7 @@ class Op(StrEnum):
     SEGMENT = "segment"
     MEASURE = "measure"
     ISOLATE_VOLUME = "isolate_volume"
+    ISO_SURFACE = "iso_surface"
     DETECT_CARIES = "detect_caries"
 
 

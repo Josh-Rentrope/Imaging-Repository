@@ -10,6 +10,7 @@ dependencies = [
     "python-multipart>=0.0.12",
     "pydicom>=3.0.2",
     "numpy>=2.5.3",
+    "scikit-image>=0.26.0",
 ]
 
 [project.optional-dependencies]
@@ -31,3 +32,10 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+# skimage reaches into a numpy array's `.shape` in a way numpy 2.5 deprecated.
+# Third-party internals, not ours; filtered so the suite stays readable.
+filterwarnings = [
+    "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning",
+]

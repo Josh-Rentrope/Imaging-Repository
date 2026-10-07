@@ -192,7 +192,14 @@ def test_dicom_parser_rejects_non_dicom():
 # ── sources ─────────────────────────────────────────────────────────────────
 
 
-def make_slice(index: int, series_uid: str, rows: int = 8, cols: int = 8, spacing_mm: float = 1.5) -> bytes:
+def make_slice(
+    index: int,
+    series_uid: str,
+    rows: int = 8,
+    cols: int = 8,
+    spacing_mm: float = 1.5,
+    block: bool = False,
+) -> bytes:
     """A real CT slice with pixel data, so the volume path is genuinely exercised."""
     dataset = Dataset()
     dataset.file_meta = FileMetaDataset()
@@ -225,6 +232,8 @@ def make_slice(index: int, series_uid: str, rows: int = 8, cols: int = 8, spacin
     dataset.RescaleIntercept = -1024
 
     pixels = np.full((rows, cols), 100 + index * 10, dtype=np.uint16)
+    if block:
+        pixels[rows // 4: -rows // 4, cols // 4: -cols // 4] = 3000
     dataset.PixelData = pixels.tobytes()
 
     buffer = io.BytesIO()
@@ -369,3 +378,87 @@ def test_headerless_upload_is_kept_and_flagged(client):
     assert source["headerless"] is True
     assert source["instance_count"] == 1
     assert source["renderable"] is False
+
+
+# ── iso-surface ─────────────────────────────────────────────────────────────
+
+
+def upload_blocky_series(client, slices: int = 6, rows: int = 24, cols: int = 24) -> dict:
+    series_uid = generate_uid()
+    payloads = [
+        (f"s{i:03d}.dcm", make_slice(i, series_uid, rows=rows, cols=cols, spacing_mm=1.0, block=True))
+        for i in range(slices)
+    ]
+    return upload_dicom(client, payloads).json()
+
+
+def test_iso_surface_extracts_a_mesh_from_a_volume(client):
+    source = upload_blocky_series(client)
+
+    response = client.post(
+        "/jobs",
+        json={
+            "stages": [{"op": "iso_surface", "params": {"threshold": 500}}],
+            "capture": {"capture_id": source["source_id"], "modality": "radiograph",
+                        "source_id": source["source_id"]},
+        },
+    )
+    assert response.status_code == 201, response.text
+    job = response.json()
+    assert job["status"] == "succeeded", job["error"]
+
+    result = job["result"]
+    assert result["ops"] == ["iso_surface"]
+    mesh = next(a for a in result["artifacts"] if a["kind"] == "mesh")
+    assert mesh["format"] == "ply" and mesh["units"] == "mm"
+    assert mesh["triangles"] > 0 and mesh["vertices"] > 0
+    assert result["geometry"]["threshold"] == 500
+
+    # The surface must sit inside the volume's world extent, not at the origin.
+    xmin, xmax, ymin, ymax, zmin, zmax = result["geometry"]["bounds"]
+    assert xmax > xmin and ymax > ymin and zmax > zmin
+    assert zmin == pytest.approx(0.0, abs=1.5) and zmax == pytest.approx(5.0, abs=1.5)
+
+
+def test_iso_surface_ply_is_binary_and_parses(client):
+    source = upload_blocky_series(client)
+    job = client.post(
+        "/jobs",
+        json={"stages": [{"op": "iso_surface", "params": {"threshold": 500}}],
+              "capture": {"source_id": source["source_id"]}},
+    ).json()
+    mesh = next(a for a in job["result"]["artifacts"] if a["kind"] == "mesh")
+
+    body = client.get("/artifacts/" + mesh["ref"].split("://", 1)[1]).content
+    marker = b"end_header" + bytes([10])
+    header_end = body.index(marker) + len(marker)
+    assert b"format binary_little_endian 1.0" in body[:200]
+
+    header_lines = body[:header_end].decode("ascii").splitlines()
+    vertex_count = int(next(l for l in header_lines if l.startswith("element vertex")).split()[-1])
+    face_count = int(next(l for l in header_lines if l.startswith("element face")).split()[-1])
+    assert vertex_count == mesh["vertices"] and face_count == mesh["triangles"]
+
+    # 12 bytes a vertex, 13 bytes a face (uchar count + three int32).
+    assert len(body) - header_end == vertex_count * 12 + face_count * 13
+
+    verts = np.frombuffer(body, dtype="<f4", count=vertex_count * 3, offset=header_end)
+    verts = verts.reshape(vertex_count, 3)
+    assert np.isfinite(verts).all()
+
+
+def test_iso_surface_rejects_a_threshold_outside_the_range(client):
+    source = upload_blocky_series(client)
+    job = client.post(
+        "/jobs",
+        json={"stages": [{"op": "iso_surface", "params": {"threshold": 99999}}],
+              "capture": {"source_id": source["source_id"]}},
+    ).json()
+    assert job["status"] == "failed"
+    assert "outside the volume" in (job["error"] or "")
+
+
+def test_iso_surface_without_a_source_fails_cleanly(client):
+    job = client.post("/jobs", json={"stages": [{"op": "iso_surface"}], "capture": {}}).json()
+    assert job["status"] == "failed"
+    assert "source_id" in (job["error"] or "")

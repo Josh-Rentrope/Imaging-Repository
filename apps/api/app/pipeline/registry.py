@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 
+from ..sources import SourceStore
 from ..storage import LocalStorage
 from .fixture import FixtureBackend
 from .interfaces import (
@@ -28,15 +29,19 @@ class BackendRegistry:
         storage: LocalStorage,
         recordings_dir: Path | None = None,
         preference: str = "auto",
+        source_store: SourceStore | None = None,
     ) -> None:
         self._storage = storage
         self._recordings_dir = recordings_dir
         self._preference = preference
+        self._source_store = source_store
         self._backends: dict[str, InferenceBackend] = {}
         self._load()
 
     def _load(self) -> None:
-        self._backends[BackendId.FIXTURE] = FixtureBackend(self._storage, self._recordings_dir)
+        self._backends[BackendId.FIXTURE] = FixtureBackend(
+            self._storage, self._source_store, self._recordings_dir
+        )
 
         ondevice = OnDeviceBackend()
         if ondevice.capabilities().ops:

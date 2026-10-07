@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from ..sources import SourceStore
 from ..storage import LocalStorage
 from .interfaces import (
     BackendId,
@@ -31,7 +32,9 @@ from .interfaces import (
     Op,
     OpNotSupported,
 )
+from .isosurface import SurfaceError, extract
 from .meshgen import build_dental_arch, to_ply
+from .ply import write_ply
 
 #: FDI numbers per quadrant, mesial to distal.
 _UPPER_RIGHT = (18, 17, 16, 15, 14, 13, 12, 11)
@@ -41,8 +44,14 @@ _ENVELOPE_VERSION = "1.0"
 
 
 class FixtureBackend:
-    def __init__(self, storage: LocalStorage, recordings_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        storage: LocalStorage,
+        source_store: SourceStore | None = None,
+        recordings_dir: Path | None = None,
+    ) -> None:
         self.storage = storage
+        self.source_store = source_store
         self.recordings_dir = recordings_dir
         self._handlers: dict[str, Callable[[dict, dict, dict], None]] = {
             Op.RECTIFY: _rectify,
@@ -50,6 +59,7 @@ class FixtureBackend:
             Op.SEGMENT: _segment,
             Op.MEASURE: _measure,
             Op.ISOLATE_VOLUME: _isolate_volume,
+            Op.ISO_SURFACE: _iso_surface,
             Op.DETECT_CARIES: _detect_caries,
         }
 
@@ -84,7 +94,11 @@ class FixtureBackend:
             "provenance": {"backend": BackendId.FIXTURE, "started_at": started.isoformat()},
         }
 
-        context: dict[str, Any] = {"capture": capture, "storage": self.storage}
+        context: dict[str, Any] = {
+            "capture": capture,
+            "storage": self.storage,
+            "sources": self.source_store,
+        }
 
         for stage in request.stages:
             handler = self._handlers.get(stage.op)
@@ -226,6 +240,64 @@ def _isolate_volume(envelope: dict, params: dict, context: dict) -> None:
         _placeholder_volume(32),
     )
     envelope["artifacts"].append({"kind": "volume", "format": "vtk", "ref": ref, "units": "mm"})
+
+
+def _iso_surface(envelope: dict, params: dict, context: dict) -> None:
+    """Marching cubes over a stored volume at a density threshold.
+
+    Needs a source rather than a capture: the volume lives in the source store,
+    already decoded, so the job points at it by id.
+    """
+    storage: LocalStorage = context["storage"]
+    sources: SourceStore | None = context.get("sources")
+    source_id = (context.get("capture") or {}).get("source_id")
+
+    if sources is None or not source_id:
+        raise SurfaceError("iso_surface needs capture.source_id")
+
+    record = sources.get(str(source_id))
+    if record is None:
+        raise SurfaceError(f"no source {source_id!r}")
+
+    payload = sources.volume_payload(record)
+    if payload is None:
+        raise SurfaceError(record.render_reason or "this source has no volume to extract from")
+
+    threshold = float(params.get("threshold", 300))
+    stride = int(params.get("stride", 1))
+
+    surface = extract(storage.get(payload.bin_ref), payload.header, threshold, stride)
+    ref = storage.put(
+        f"artifacts/{envelope['result_id']}/surface.ply",
+        write_ply(surface.vertices, surface.faces),
+    )
+
+    envelope["artifacts"].append(
+        {
+            "kind": "mesh",
+            "format": "ply",
+            "ref": ref,
+            "units": "mm",
+            "vertices": int(len(surface.vertices)),
+            "triangles": int(len(surface.faces)),
+        }
+    )
+    envelope["geometry"] = {
+        "threshold": surface.threshold,
+        "stride": surface.stride,
+        "bounds": _bounds(surface.vertices),
+    }
+
+
+def _bounds(vertices) -> list[float]:
+    return [
+        float(vertices[:, 0].min()),
+        float(vertices[:, 0].max()),
+        float(vertices[:, 1].min()),
+        float(vertices[:, 1].max()),
+        float(vertices[:, 2].min()),
+        float(vertices[:, 2].max()),
+    ]
 
 
 def _detect_caries(envelope: dict, params: dict, context: dict) -> None:

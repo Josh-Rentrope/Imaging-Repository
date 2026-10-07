@@ -24,13 +24,15 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     app.state.settings = settings
     app.state.storage = LocalStorage(settings.data_dir)
+    # The source store comes first: the pipeline reads volumes out of it.
+    app.state.source_store = SourceStore(app.state.storage)
     app.state.registry = BackendRegistry(
         storage=app.state.storage,
         recordings_dir=settings.recordings_dir,
         preference=settings.backend,
+        source_store=app.state.source_store,
     )
     app.state.job_store = JobStore(app.state.registry)
-    app.state.source_store = SourceStore(app.state.storage)
     yield
 
 
