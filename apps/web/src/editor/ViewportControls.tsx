@@ -208,6 +208,14 @@ export function ViewportControls({
                     <span className="field-label mono">{axis.toUpperCase()}</span>
                     <button
                       className="ghost"
+                      title={plane.showPlane ? 'Hide the plane graphic (the cut stays on)' : 'Show the plane graphic'}
+                      disabled={!plane.enabled}
+                      onClick={() => setPlane(axis, { showPlane: !plane.showPlane })}
+                    >
+                      {plane.showPlane ? '👁' : '🚫'}
+                    </button>
+                    <button
+                      className="ghost"
                       title="Cut from the other side"
                       disabled={!plane.enabled}
                       onClick={() => setPlane(axis, { flip: !plane.flip })}
@@ -231,9 +239,9 @@ export function ViewportControls({
                 onClick={() =>
                   patch({
                     planes: {
-                      x: { enabled: false, position: 0.5, flip: false },
-                      y: { enabled: false, position: 0.5, flip: false },
-                      z: { enabled: false, position: 0.5, flip: false },
+                      x: { enabled: false, showPlane: true, position: 0.5, flip: false },
+                      y: { enabled: false, showPlane: true, position: 0.5, flip: false },
+                      z: { enabled: false, showPlane: true, position: 0.5, flip: false },
                     },
                   })
                 }

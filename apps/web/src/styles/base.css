@@ -346,6 +346,39 @@ button.ghost {
   border-color: transparent;
 }
 
+/* ── Results list ────────────────────────────────────────────────────────── */
+
+.result-item {
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 4px 4px 5px;
+}
+
+.result-item:hover { background: var(--control); }
+
+.result-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.result-row .source-item-name { font-size: 12px; }
+
+.result-row button.ghost {
+  padding: 0 5px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.result-meta {
+  color: var(--fg-muted);
+  font-size: 10px;
+  padding-left: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ── Modal ───────────────────────────────────────────────────────────────── */
 
 .modal-backdrop {

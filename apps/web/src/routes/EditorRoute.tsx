@@ -1,11 +1,18 @@
 import { useEffect, useState } from 'react'
 
-import { OPS_BY_KIND, PipelineSection } from '../editor/PipelineSection'
-import { ResultSection } from '../editor/ResultSection'
+import {
+  buildStages,
+  DEFAULT_THRESHOLD,
+  OPS_BY_KIND,
+  PipelineSection,
+  type PipelineParams,
+} from '../editor/PipelineSection'
+import { ResultsSection, type ResultView } from '../editor/ResultsSection'
 import { SourceSection } from '../editor/SourceSection'
 import { Viewport3D } from '../editor/Viewport3D'
+import { surfaceColor } from '../editor/viewportSettings'
 import { api } from '../lib/api'
-import type { Job, SourceSummary, Stage } from '../lib/types'
+import { Op, type Job, type SourceSummary, type Stage, type VolumePayload } from '../lib/types'
 import { useEditor } from '../state/editor'
 
 /** Capture descriptor for a source. Photos carry no depth unless told otherwise. */
@@ -28,26 +35,68 @@ function buildCapture(source: SourceSummary, hasDepth: boolean, hasFiducial: boo
   }
 }
 
+function labelFor(stages: Stage[], job: Job): string {
+  const ops = stages.map((stage) => stage.op)
+  if (ops.length === 1 && ops[0] === Op.ISO_SURFACE) {
+    const threshold = job.result?.geometry?.threshold
+    return threshold != null ? `Surface @ ${Math.round(threshold)}` : 'Surface'
+  }
+  return ops.join(' → ')
+}
+
 export default function EditorRoute() {
   const { activeSource, activeWorkspace, activeSet, refreshSources, selectSource } = useEditor()
 
   const [selectedOps, setSelectedOps] = useState<string[]>([])
+  const [params, setParams] = useState<PipelineParams>({
+    threshold: DEFAULT_THRESHOLD,
+    stride: 1,
+  })
   const [hasDepth, setHasDepth] = useState(false)
   const [hasFiducial, setHasFiducial] = useState(false)
 
-  const [job, setJob] = useState<Job | null>(null)
+  // Results are kept per source so switching away and back does not lose them.
+  const [resultsBySource, setResultsBySource] = useState<Record<string, ResultView[]>>({})
+  const [volume, setVolume] = useState<VolumePayload | null>(null)
+
   const [busy, setBusy] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const sourceId = activeSource?.source_id ?? null
+  const results = sourceId ? (resultsBySource[sourceId] ?? []) : []
   const ops = activeSource ? OPS_BY_KIND[activeSource.kind] : []
+  const valueRange = volume?.header.value_range ?? null
 
-  // Changing source resets the run and pre-selects that kind's operations.
+  // The volume is fetched here rather than in the viewport because the pipeline
+  // threshold needs the same value range to be meaningful.
   useEffect(() => {
-    setJob(null)
+    if (!sourceId || activeSource?.kind !== 'dicom' || !activeSource.renderable) {
+      setVolume(null)
+      return
+    }
+    let cancelled = false
+    api
+      .getVolume(sourceId)
+      .then((payload) => {
+        if (!cancelled) setVolume(payload)
+      })
+      .catch(() => {
+        if (!cancelled) setVolume(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [sourceId, activeSource?.kind, activeSource?.renderable])
+
+  // Changing source resets the run form and pre-selects that kind's operations.
+  useEffect(() => {
     setError(null)
     setSelectedOps(activeSource ? OPS_BY_KIND[activeSource.kind] : [])
-  }, [activeSource?.source_id, activeSource?.kind])
+  }, [sourceId, activeSource?.kind])
+
+  const updateResults = (id: string, update: (list: ResultView[]) => ResultView[]) =>
+    setResultsBySource((current) => ({ ...current, [id]: update(current[id] ?? []) }))
 
   async function handleFiles(files: File[], kind: 'dicom' | 'images') {
     setUploading(true)
@@ -67,21 +116,31 @@ export default function EditorRoute() {
   }
 
   async function run() {
-    if (!activeSource) return
+    if (!activeSource || !sourceId) return
     setBusy(true)
     setError(null)
-    setJob(null)
     try {
-      const stages: Stage[] = selectedOps.map((op) => ({ op }))
-      let current = await api.submitJob({
+      const stages = buildStages(selectedOps, params)
+      let job = await api.submitJob({
         stages,
         capture: buildCapture(activeSource, hasDepth, hasFiducial),
       })
-      for (let i = 0; i < 20 && ['queued', 'running'].includes(current.status); i++) {
+      for (let i = 0; i < 30 && ['queued', 'running'].includes(job.status); i++) {
         await new Promise((resolve) => setTimeout(resolve, 250))
-        current = await api.getJob(current.job_id)
+        job = await api.getJob(job.job_id)
       }
-      setJob(current)
+
+      const index = (resultsBySource[sourceId] ?? []).length
+      const entry: ResultView = {
+        id: job.job_id,
+        job,
+        label: labelFor(stages, job),
+        detail: `${job.ops.join(' → ')} · ${job.result?.model_version ?? job.status}`,
+        visible: true,
+        clipped: true,
+        color: surfaceColor(index),
+      }
+      updateResults(sourceId, (list) => [...list, entry])
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -91,7 +150,7 @@ export default function EditorRoute() {
 
   return (
     <div className="editor">
-      <Viewport3D source={activeSource} result={job?.result ?? null} job={job} busy={busy} />
+      <Viewport3D source={activeSource} volume={volume} results={results} busy={busy} />
 
       <aside className="sidebar">
         <SourceSection onFiles={handleFiles} uploading={uploading} />
@@ -122,6 +181,9 @@ export default function EditorRoute() {
               current.includes(op) ? current.filter((o) => o !== op) : [...current, op],
             )
           }
+          params={params}
+          onParamsChange={setParams}
+          valueRange={valueRange}
           onRun={run}
           canRun={Boolean(activeSource)}
           busy={busy}
@@ -135,7 +197,25 @@ export default function EditorRoute() {
           </div>
         )}
 
-        <ResultSection job={job} />
+        {sourceId && (
+          <ResultsSection
+            results={results}
+            onToggleVisible={(id) =>
+              updateResults(sourceId, (list) =>
+                list.map((r) => (r.id === id ? { ...r, visible: !r.visible } : r)),
+              )
+            }
+            onToggleClipped={(id) =>
+              updateResults(sourceId, (list) =>
+                list.map((r) => (r.id === id ? { ...r, clipped: !r.clipped } : r)),
+              )
+            }
+            onRemove={(id) =>
+              updateResults(sourceId, (list) => list.filter((r) => r.id !== id))
+            }
+            onClear={() => updateResults(sourceId, () => [])}
+          />
+        )}
       </aside>
     </div>
   )

@@ -16,7 +16,11 @@ export type BackgroundName = 'dark' | 'mid' | 'light' | 'custom'
 export type DensityUnit = 'fraction' | 'value'
 
 export interface PlaneSettings {
+  /** Whether the plane is cutting. */
   enabled: boolean
+  /** Whether the translucent quad is drawn. Independent of `enabled`, so a cut
+   *  can stay armed while its graphic is hidden. */
+  showPlane: boolean
   /** 0..1 along this axis's extent. */
   position: number
   /** Cut from the far side instead of the near side. */
@@ -76,10 +80,22 @@ export const DEFAULT_SETTINGS: ViewportSettings = {
   cutAboveHigh: true,
   opacityUnitDistance: 1,
   planes: {
-    x: { enabled: false, position: 0.5, flip: false },
-    y: { enabled: false, position: 0.5, flip: false },
-    z: { enabled: false, position: 0.5, flip: false },
+    x: { enabled: false, showPlane: true, position: 0.5, flip: false },
+    y: { enabled: false, showPlane: true, position: 0.5, flip: false },
+    z: { enabled: false, showPlane: true, position: 0.5, flip: false },
   },
+}
+
+/** Tint cycled across pipeline results so overlapping surfaces stay tellable apart. */
+export const SURFACE_COLORS: [number, number, number][] = [
+  [0.98, 0.82, 0.35],
+  [0.42, 0.85, 0.75],
+  [0.95, 0.55, 0.65],
+  [0.62, 0.72, 0.98],
+]
+
+export function surfaceColor(index: number): [number, number, number] {
+  return SURFACE_COLORS[index % SURFACE_COLORS.length]
 }
 
 export interface DensityPreset {

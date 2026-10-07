@@ -1,14 +1,16 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useMemo, useState } from 'react'
 
-import { api } from '../lib/api'
-import type { Job, ResultEnvelope, SourceSummary, VolumePayload } from '../lib/types'
-import type { SceneInput } from './Scene'
+import type { ResultEnvelope, SourceSummary, VolumePayload } from '../lib/types'
+import type { ResultView } from './ResultsSection'
+import type { SceneModel, SceneSurface } from './Scene'
 import { ViewportControls } from './ViewportControls'
 import { DEFAULT_SETTINGS, type ViewportSettings } from './viewportSettings'
 
 // vtk.js is heavy and is only needed once something is actually being rendered,
 // so the whole renderer is behind a dynamic import.
 const Scene = lazy(() => import('./Scene').then((module) => ({ default: module.Scene })))
+
+const MESH_FORMATS = new Set(['ply', 'stl'])
 
 /**
  * Scale indicator. When `verified` is false the geometry has no metric anchor,
@@ -29,65 +31,52 @@ function ScaleTag({ scale }: { scale: ResultEnvelope['scale'] }) {
   )
 }
 
-function placeholderFor(source: SourceSummary | null, loadingVolume: boolean): string {
+function placeholderFor(source: SourceSummary | null): string {
   if (!source) return 'Drop a source to begin'
-  if (loadingVolume) return 'Loading volume…'
   if (!source.renderable) return source.render_reason ?? 'Nothing to display'
-  return 'Select the source'
+  return 'Select source and run the pipeline'
 }
 
 export function Viewport3D({
   source,
-  result,
-  job,
+  volume,
+  results,
   busy,
 }: {
   source: SourceSummary | null
-  result: ResultEnvelope | null
-  job: Job | null
+  volume: VolumePayload | null
+  results: ResultView[]
   busy: boolean
 }) {
-  const [volume, setVolume] = useState<VolumePayload | null>(null)
-  const [loadingVolume, setLoadingVolume] = useState(false)
   const [settings, setSettings] = useState<ViewportSettings>(DEFAULT_SETTINGS)
 
-  const renderableDicom = source?.kind === 'dicom' && source.renderable
-
-  useEffect(() => {
-    if (!source || !renderableDicom) {
-      setVolume(null)
-      return
+  // Hidden results stay in the model: dropping them here would change the key
+  // and force a rebuild, when all that is needed is an actor visibility flip.
+  const model = useMemo<SceneModel>(() => {
+    const surfaces: SceneSurface[] = []
+    for (const result of results) {
+      const artifacts = result.job.result?.artifacts ?? []
+      for (const artifact of artifacts) {
+        if (artifact.kind !== 'mesh' || !MESH_FORMATS.has(artifact.format)) continue
+        surfaces.push({
+          id: result.id,
+          meshRef: artifact.ref,
+          format: artifact.format,
+          visible: result.visible,
+          clipped: result.clipped,
+          color: result.color,
+        })
+      }
     }
 
-    let cancelled = false
-    setLoadingVolume(true)
-    api
-      .getVolume(source.source_id)
-      .then((payload) => {
-        if (!cancelled) setVolume(payload)
-      })
-      .catch(() => {
-        if (!cancelled) setVolume(null)
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingVolume(false)
-      })
-
-    return () => {
-      cancelled = true
+    return {
+      volume: volume ? { headerRef: volume.header_ref, binRef: volume.bin_ref } : null,
+      surfaces,
     }
-  }, [source, renderableDicom])
+  }, [volume, results])
 
-  // A pipeline result takes precedence over the source's own volume, so running
-  // segmentation on a series shows the derived geometry rather than the raw scan.
-  const mesh = result?.artifacts.find((a) => a.kind === 'mesh') ?? null
-  const input = useMemo<SceneInput | null>(() => {
-    if (mesh) return { kind: 'surface', meshRef: mesh.ref, format: mesh.format }
-    if (volume) return { kind: 'volume', headerRef: volume.header_ref, binRef: volume.bin_ref }
-    return null
-  }, [mesh?.ref, mesh?.format, volume])
-
-  const hasVolume = input?.kind === 'volume'
+  const latest = [...results].reverse().find((r) => r.job.result)?.job.result ?? null
+  const hasContent = model.volume !== null || model.surfaces.length > 0
 
   return (
     <section className="viewport">
@@ -95,30 +84,29 @@ export function Viewport3D({
         <span className="tag">{source?.name ?? 'No source'}</span>
         <span style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
           {busy && <span className="tag">running</span>}
-          {result && <ScaleTag scale={result.scale} />}
-          {input && (
+          {latest && <ScaleTag scale={latest.scale} />}
+          {hasContent && (
             <ViewportControls
               settings={settings}
               onChange={setSettings}
-              valueRange={hasVolume ? (volume?.header.value_range ?? null) : null}
+              valueRange={volume?.header.value_range ?? null}
             />
           )}
         </span>
       </div>
 
-      {input ? (
+      {hasContent ? (
         <Suspense fallback={<div className="empty-state">Loading renderer…</div>}>
-          <Scene input={input} settings={settings} />
+          <Scene model={model} settings={settings} />
         </Suspense>
       ) : (
-        <div className="empty-state">{placeholderFor(source, loadingVolume)}</div>
+        <div className="empty-state">{placeholderFor(source)}</div>
       )}
 
-      {result && (
+      {latest && (
         <div className="viewport-footer">
-          <span className="tag mono">{result.ops.join(' → ')}</span>
-          <span className="tag mono">{result.model_version}</span>
-          {job?.backend && <span className="tag">{job.backend}</span>}
+          <span className="tag mono">{latest.ops.join(' → ')}</span>
+          <span className="tag mono">{latest.model_version}</span>
         </div>
       )}
     </section>

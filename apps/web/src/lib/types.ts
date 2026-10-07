@@ -13,6 +13,7 @@ export const Op = {
   SEGMENT: 'segment',
   MEASURE: 'measure',
   ISOLATE_VOLUME: 'isolate_volume',
+  ISO_SURFACE: 'iso_surface',
   DETECT_CARIES: 'detect_caries',
 } as const
 
@@ -53,6 +54,8 @@ export interface ResultArtifact {
   ref: string
   units?: 'mm' | 'arbitrary'
   bytes?: number
+  vertices?: number
+  triangles?: number
 }
 
 export interface SegmentationInstance {
@@ -102,6 +105,11 @@ export interface ResultEnvelope {
     voxel_size_mm?: number
     frames_used?: number
     registration_residual_mm?: number
+    /** Density threshold an extracted surface was taken at, in the volume's units. */
+    threshold?: number
+    stride?: number
+    /** [xmin, xmax, ymin, ymax, zmin, zmax] of an extracted surface, world space. */
+    bounds?: number[]
   } | null
   artifacts: ResultArtifact[]
   segmentation?: Segmentation | null
