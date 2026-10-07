@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import json
 import struct
+import time
 import zipfile
 
 import numpy as np
@@ -58,10 +59,75 @@ def client(tmp_path, monkeypatch):
 # ── pipeline ────────────────────────────────────────────────────────────────
 
 
-def run(client: TestClient, stages: list[dict], capture: dict | None = None, **extra) -> dict:
+def settle(client: TestClient, job: dict, timeout: float = 60.0) -> dict:
+    """Poll a job until it stops being queued or running.
+
+    Submission returns as soon as the job is accepted — the work happens on a
+    thread — so every assertion about an outcome has to wait for it.
+    """
+    deadline = time.monotonic() + timeout
+    while job["status"] in ("queued", "running"):
+        assert time.monotonic() < deadline, f"job never finished: {job}"
+        time.sleep(0.02)
+        job = client.get(f"/jobs/{job['job_id']}").json()
+    return job
+
+
+def submit(client: TestClient, stages: list[dict], capture: dict | None = None, **extra) -> dict:
     response = client.post("/jobs", json={"stages": stages, "capture": capture, **extra})
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def run(client: TestClient, stages: list[dict], capture: dict | None = None, **extra) -> dict:
+    return settle(client, submit(client, stages, capture, **extra))
+
+
+def test_a_finished_job_outlives_the_process_that_ran_it(tmp_path, monkeypatch):
+    """The record is on disk, so a reload does not cost the run.
+
+    This is the whole point of persisting jobs: the dev server restarts on every
+    edit, and the artifacts are on disk either way — without the job that
+    describes them, a minute-long segmentation becomes an orphaned file.
+    """
+    monkeypatch.setenv("BONE_VIEWER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("BONE_VIEWER_RECORDINGS_DIR", str(tmp_path / "recordings"))
+    from app.config import get_settings
+
+    capture = {**RGBD_CAPTURE, "source_id": "source-under-test"}
+    get_settings.cache_clear()
+    with TestClient(create_app()) as first:
+        job = run(first, [{"op": "reconstruct"}], capture)
+        assert job["status"] == "succeeded"
+    get_settings.cache_clear()
+
+    # A second app over the same data directory: exactly what a restart does.
+    with TestClient(create_app()) as second:
+        listed = second.get("/jobs?source_id=source-under-test").json()
+
+    assert [entry["job_id"] for entry in listed] == [job["job_id"]]
+    assert listed[0]["result"]["ops"] == ["reconstruct"]
+
+
+def test_listing_jobs_can_be_scoped_to_one_source(client):
+    """Otherwise a reloaded page shows every run the server has ever done."""
+    run(client, [{"op": "reconstruct"}], {**RGBD_CAPTURE, "source_id": "source-a"})
+    run(client, [{"op": "reconstruct"}], {**RGBD_CAPTURE, "source_id": "source-b"})
+
+    scoped = client.get("/jobs?source_id=source-a").json()
+    assert len(scoped) == 1
+    assert scoped[0]["source_id"] == "source-a"
+
+
+def test_a_rejection_is_reported_on_the_submitting_request(client):
+    """Diagnostic gating is decided before any work starts.
+
+    It has to come back on the POST rather than only via polling, because the
+    caller's mistake is the request itself.
+    """
+    job = submit(client, [{"op": "detect_caries"}])
+    assert job["status"] == "rejected"
+    assert job["finished_at"] is not None
 
 
 def test_health_and_capabilities(client):
@@ -407,7 +473,7 @@ def test_iso_surface_extracts_a_mesh_from_a_volume(client):
         },
     )
     assert response.status_code == 201, response.text
-    job = response.json()
+    job = settle(client, response.json())
     assert job["status"] == "succeeded", job["error"]
 
     result = job["result"]
@@ -425,11 +491,11 @@ def test_iso_surface_extracts_a_mesh_from_a_volume(client):
 
 def test_iso_surface_ply_is_binary_and_parses(client):
     source = upload_blocky_series(client)
-    job = client.post(
+    job = settle(client, client.post(
         "/jobs",
         json={"stages": [{"op": "iso_surface", "params": {"threshold": 500}}],
               "capture": {"source_id": source["source_id"]}},
-    ).json()
+    ).json())
     mesh = next(a for a in job["result"]["artifacts"] if a["kind"] == "mesh")
 
     body = client.get("/artifacts/" + mesh["ref"].split("://", 1)[1]).content
@@ -452,17 +518,19 @@ def test_iso_surface_ply_is_binary_and_parses(client):
 
 def test_iso_surface_rejects_a_threshold_outside_the_range(client):
     source = upload_blocky_series(client)
-    job = client.post(
+    job = settle(client, client.post(
         "/jobs",
         json={"stages": [{"op": "iso_surface", "params": {"threshold": 99999}}],
               "capture": {"source_id": source["source_id"]}},
-    ).json()
+    ).json())
     assert job["status"] == "failed"
     assert "outside the volume" in (job["error"] or "")
 
 
 def test_iso_surface_without_a_source_fails_cleanly(client):
-    job = client.post("/jobs", json={"stages": [{"op": "iso_surface"}], "capture": {}}).json()
+    job = settle(client, client.post(
+        "/jobs", json={"stages": [{"op": "iso_surface"}], "capture": {}}
+    ).json())
     assert job["status"] == "failed"
     assert "source_id" in (job["error"] or "")
 
@@ -475,21 +543,21 @@ def test_iso_surface_rejects_a_single_slice_source(client):
     """
     series_uid = generate_uid()
     source = upload_dicom(client, [("only.dcm", make_slice(0, series_uid, block=True))]).json()
-    job = client.post(
+    job = settle(client, client.post(
         "/jobs",
         json={"stages": [{"op": "iso_surface", "params": {"threshold": 500}}],
               "capture": {"source_id": source["source_id"]}},
-    ).json()
+    ).json())
     assert job["status"] == "failed"
     assert "at least 2 along every axis" in (job["error"] or "")
 
 
 def test_iso_surface_names_a_missing_source(client):
-    job = client.post(
+    job = settle(client, client.post(
         "/jobs",
         json={"stages": [{"op": "iso_surface", "params": {"threshold": 500}}],
               "capture": {"source_id": "11111111-2222-3333-4444-555555555555"}},
-    ).json()
+    ).json())
     assert job["status"] == "failed"
     error = job["error"] or ""
     assert "no source" in error and "Re-upload" in error
@@ -511,13 +579,13 @@ def use_stub_segmenter(monkeypatch) -> None:
 
 
 def run_segment(client, source_id: str, **params):
-    return client.post(
+    return settle(client, client.post(
         "/jobs",
         json={
             "stages": [{"op": "segment", "params": params}],
             "capture": {"source_id": source_id},
         },
-    ).json()
+    ).json())
 
 
 def test_segment_without_a_segmenter_explains_how_to_install(client, monkeypatch):
@@ -595,10 +663,10 @@ def test_image_set_segment_stays_synthetic(client):
         data={"workspace_id": "ws-1", "set_id": "set-1"},
     )
     source = response.json()
-    job = client.post(
+    job = settle(client, client.post(
         "/jobs",
         json={"stages": [{"op": "segment"}], "capture": {"source_id": source["source_id"]}},
-    ).json()
+    ).json())
     assert job["status"] == "succeeded", job["error"]
     assert job["result"]["segmentation"]["instances"]
 
@@ -609,13 +677,13 @@ def test_image_set_segment_stays_synthetic(client):
 def run_labelled_surface(client, monkeypatch, **params):
     use_stub_segmenter(monkeypatch)
     source = upload_blocky_series(client, slices=9, rows=24, cols=24)
-    return client.post(
+    return settle(client, client.post(
         "/jobs",
         json={
             "stages": [{"op": "segment"}, {"op": "iso_surface", "params": params}],
             "capture": {"source_id": source["source_id"]},
         },
-    ).json()
+    ).json())
 
 
 def test_chained_stages_produce_a_surface_with_labels(client, monkeypatch):
@@ -656,6 +724,64 @@ def test_every_vertex_carries_a_known_label(client, monkeypatch):
     )
     assert len(values) == mesh["vertices"]
     assert set(np.unique(values).tolist()) == {1, 2}
+
+
+def test_an_anisotropic_volume_is_scaled_once():
+    """Spacing must be applied exactly once.
+
+    Marching cubes is run in voxel units and the affine carries the spacing, so
+    passing it in both places squares it — a 1x1x4 mm grid comes out 4 mm thick
+    and 16 mm tall. Anisotropy is what makes it visible; uniform spacing just
+    looks uniformly too big.
+    """
+    from app.pipeline.isosurface import extract
+
+    volume = np.zeros((6, 8, 10), dtype="<f4")  # (nz, ny, nx)
+    volume[2:4] = 1.0
+
+    header = {
+        "dims": [10, 8, 6],
+        "spacing": [1.0, 1.0, 4.0],
+        "origin": [0.0, 0.0, 0.0],
+    }
+    surface = extract(volume.tobytes(), header, threshold=0.5)
+
+    # The bloc covers voxel z 2 and 3, so the surface sits on the boundaries
+    # either side of it: z index 1.5 and 3.5, at 4 mm each — 6 and 14. Applying
+    # the spacing twice would put them at 24 and 56.
+    assert surface.vertices[:, 2].min() == pytest.approx(6.0, abs=0.01)
+    assert surface.vertices[:, 2].max() == pytest.approx(14.0, abs=0.01)
+    # x and y are unit spacing, so those stay at the array's own extent.
+    assert surface.vertices[:, 0].max() <= 10.5
+    assert surface.vertices[:, 1].max() <= 8.5
+
+
+def test_a_flipped_axis_is_honoured_not_dropped():
+    """A mask whose reader negated an axis must be placed with that negation.
+
+    Using the affine's translation alone silently mirrors the whole mask about
+    the origin. It still looks like a plausible mesh, in the wrong half of the
+    volume — which is exactly how it presents in the viewport.
+    """
+    from app.pipeline.isosurface import extract_labelled
+
+    # Array order is (z, y, x). This labels only the last slab along x.
+    labels = np.zeros((4, 4, 4), dtype=np.int32)
+    labels[:, :, 3] = 1
+
+    header = {
+        "dims": [4, 4, 4],
+        "spacing": [1.0, 1.0, 1.0],
+        "origin": [3.0, 0.0, 0.0],
+        # x direction negated: index 3 sits at world x = 3 - 3 = 0.
+        "direction": [-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        "legend": {"1": "only"},
+    }
+
+    surface = extract_labelled(labels.tobytes(), header)
+    assert surface.vertices[:, 0].max() < 1.0
+    # Ignoring the direction would put the same slab out at x = 6.
+    assert surface.vertices[:, 0].min() > -1.0
 
 
 def test_the_volume_fallback_is_in_mm3(tmp_path):
@@ -755,6 +881,37 @@ def test_label_param_restricts_the_surface(client, monkeypatch):
         client.get("/artifacts/" + labels["ref"].split("://", 1)[1]).content, dtype="<i4"
     )
     assert set(np.unique(values).tolist()) == {1}
+
+
+def test_several_labels_can_be_extracted_at_once(client, monkeypatch):
+    """Multi-select rides on the same extraction — one mesh, several labels."""
+    job = run_labelled_surface(
+        client, monkeypatch, label=["rib_left_4", "rib_left_5"]
+    )
+    assert job["status"] == "succeeded", job["error"]
+
+    labels = next(a for a in job["result"]["artifacts"] if a["kind"] == "labels")
+    header = json.loads(
+        client.get("/artifacts/" + labels["header_ref"].split("://", 1)[1]).content
+    )
+    assert set(header["legend"].keys()) == {"1", "2"}
+
+    values = np.frombuffer(
+        client.get("/artifacts/" + labels["ref"].split("://", 1)[1]).content, dtype="<i4"
+    )
+    assert set(np.unique(values).tolist()) == {1, 2}
+
+
+def test_an_empty_label_list_means_every_label(client, monkeypatch):
+    """An empty filter is no filter, which is what the form sends by default."""
+    job = run_labelled_surface(client, monkeypatch, label=[])
+    assert job["status"] == "succeeded", job["error"]
+
+    labels = next(a for a in job["result"]["artifacts"] if a["kind"] == "labels")
+    header = json.loads(
+        client.get("/artifacts/" + labels["header_ref"].split("://", 1)[1]).content
+    )
+    assert set(header["legend"].keys()) == {"1", "2"}
 
 
 def test_unknown_label_names_the_available_ones(client, monkeypatch):

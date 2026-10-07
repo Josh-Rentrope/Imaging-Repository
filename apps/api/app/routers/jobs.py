@@ -24,8 +24,18 @@ def submit(
 
 
 @router.get("", response_model=list[Job])
-def list_jobs(store: Annotated[JobStore, Depends(get_job_store)], limit: int = 50) -> list[Job]:
-    return store.list(limit=limit)
+def list_jobs(
+    store: Annotated[JobStore, Depends(get_job_store)],
+    limit: int = 50,
+    source_id: str | None = None,
+) -> list[Job]:
+    """Recent jobs, newest first, optionally only those on one source.
+
+    This is how a reloaded page gets its results back without re-running
+    anything: the artifacts are already on disk and the job that describes them
+    is already recorded.
+    """
+    return store.list(limit=limit, source_id=source_id)
 
 
 @router.get("/{job_id}", response_model=Job)

@@ -44,6 +44,14 @@ class SegFailed(Exception):
     """TotalSegmentator ran and did not produce a usable result."""
 
 
+#: NIfTI writes its world frame in RAS; DICOM's patient frame — and so every
+#: coordinate we store from `ImagePositionPatient` — is LPS. The two differ by
+#: negating x and y, and a mask carried across without that swap is mirrored
+#: about the origin: a rib lands on the far side of the scanner. Four-by-four
+#: because it multiplies the whole affine, translation included.
+RAS_TO_LPS = np.diag([-1.0, -1.0, 1.0, 1.0])
+
+
 @dataclass
 class Segmentation:
     """A multi-label mask, kept in its own geometry."""
@@ -53,6 +61,9 @@ class Segmentation:
     spacing: tuple[float, float, float]
     origin: tuple[float, float, float]
     legend: dict[int, str]  # label id -> class name
+    #: Row-major rotation of the index-to-world affine, unit cosines. Identity
+    #: for an axis-aligned grid; a negated axis is a flip the reader applied.
+    direction: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
     volumes_mm3: dict[str, float] = field(default_factory=dict)
     task: str = "total"
 
@@ -140,9 +151,22 @@ def info_binary(segmenter: str = "") -> list[str] | None:
     return None
 
 
+#: Keyed on the configuration as well as the task. A bare task key would serve
+#: one install's names for another's — and in tests, one stub's for the next.
+_NAMES_CACHE: dict[tuple[str, str, str], dict[int, str]] = {}
+
+
 def class_names(task: str = "total") -> dict[int, str]:
     """Label id -> class name for a task. Empty when it cannot be resolved."""
-    argv = info_binary(os.environ.get("BONE_VIEWER_TOTALSEGMENTATOR", ""))
+    segmenter = os.environ.get("BONE_VIEWER_TOTALSEGMENTATOR", "")
+    info = os.environ.get("BONE_VIEWER_TOTALSEG_INFO", "")
+
+    key = (segmenter, info, task)
+    cached = _NAMES_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    argv = info_binary(segmenter)
     if argv is None:
         return {}
 
@@ -169,6 +193,8 @@ def class_names(task: str = "total") -> dict[int, str]:
         name = rest.strip()
         if head.isdigit() and name:
             names[int(head)] = name
+
+    _NAMES_CACHE[key] = names
     return names
 
 
@@ -271,10 +297,19 @@ def _read(mask_path: Path, out_dir: Path, task: str = "total") -> Segmentation:
         raise SegFailed(f"expected a 3D mask, got shape {data.shape}")
     labels = np.ascontiguousarray(np.transpose(data, (2, 1, 0))).astype(np.int32)
 
-    # Affine column norms give the voxel size; the last column is the origin.
-    affine = image.affine
-    spacing = tuple(float(np.linalg.norm(affine[:3, axis])) for axis in range(3))
+    # The affine arrives in NIfTI's RAS frame; everything we store is in the
+    # DICOM patient frame, so the swap happens here, once, at the boundary.
+    affine = RAS_TO_LPS @ image.affine
+    linear = affine[:3, :3]
+
+    spacing = tuple(float(np.linalg.norm(linear[:, axis])) for axis in range(3))
     origin = tuple(float(v) for v in affine[:3, 3])
+
+    # Unit direction cosines: the affine's columns with the spacing divided out.
+    # A negative entry is a flip, and it has to survive into the header or the
+    # mask is placed by its translation alone.
+    safe = np.array([s if s else 1.0 for s in spacing])
+    direction = tuple(float(v) for v in (linear / safe).reshape(-1))
 
     # The task's own class list: `teeth` and `total` number their labels
     # differently, so asking for the wrong one renames every structure.
@@ -286,6 +321,7 @@ def _read(mask_path: Path, out_dir: Path, task: str = "total") -> Segmentation:
         dims=(int(labels.shape[2]), int(labels.shape[1]), int(labels.shape[0])),
         spacing=(spacing[0], spacing[1], spacing[2]),
         origin=(origin[0], origin[1], origin[2]),
+        direction=direction,
         legend=legend,
         volumes_mm3=volumes,
         task=task,
@@ -360,6 +396,7 @@ def serialise(seg: Segmentation) -> tuple[bytes, dict]:
         "dims": list(seg.dims),
         "spacing": [float(v) for v in seg.spacing],
         "origin": [float(v) for v in seg.origin],
+        "direction": [float(v) for v in seg.direction],
         "dtype": "int32",
         "byte_length": int(seg.labels.nbytes),
         "labels": sorted(int(v) for v in np.unique(seg.labels) if v != 0),

@@ -42,6 +42,9 @@ class Job(BaseModel):
     status: JobStatus
     ops: list[str]
     backend: str | None = None
+    #: Which source this ran against. Lets a reloaded page ask for its own
+    #: results instead of every job the server has ever run.
+    source_id: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     finished_at: datetime | None = None
     result: dict[str, Any] | None = None

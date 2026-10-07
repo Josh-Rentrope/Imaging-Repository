@@ -7,6 +7,12 @@ dimensions, and marching cubes returns vertices in the array's own axis order
 (z, y, x). Reordering them into (x, y, z) is a transposition, which mirrors
 handedness, so the triangle winding has to be reversed with it or every normal
 points inward.
+
+The transform from index space to world is the header's own affine, direction
+included — not spacing and translation alone. A grid whose reader flipped an
+axis needs that flip, and dropping it mirrors the whole surface about the
+origin: a mask lands hundreds of millimetres from the scan it was segmented
+from, which reads as a mysterious offset rather than as a missing sign.
 """
 
 from __future__ import annotations
@@ -16,6 +22,39 @@ from typing import Any
 
 import numpy as np
 from skimage import measure
+
+
+def world_transform(
+    header: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    """The 3x3 basis and translation taking array index (x, y, z) to world.
+
+    `direction` is the header's own rotation, row-major, as unit direction
+    cosines — the affine's columns scaled out. It defaults to the identity, so a
+    header that predates it still resolves to plain spacing.
+    """
+    spacing = np.array([float(v) for v in header["spacing"]], dtype=np.float64)
+    origin = np.array(
+        [float(v) for v in header.get("origin", (0.0, 0.0, 0.0))], dtype=np.float64
+    )
+
+    raw = header.get("direction")
+    if raw is None:
+        return np.diag(spacing), origin
+
+    rotation = np.array([float(v) for v in raw], dtype=np.float64).reshape(3, 3)
+    return rotation @ np.diag(spacing), origin
+
+
+def _orient(faces: np.ndarray, basis: np.ndarray) -> np.ndarray:
+    """Winding for a surface going from array order (z, y, x) into world.
+
+    Two things can mirror it: the transposition into (x, y, z) always does, and
+    the basis does whenever its determinant is negative. Two mirrors cancel, so
+    the winding is reversed only when they disagree — otherwise every normal
+    points inward and the surface is lit from the wrong side.
+    """
+    return faces[:, ::-1] if np.linalg.det(basis) > 0 else faces
 
 
 @dataclass
@@ -50,8 +89,7 @@ class SurfaceError(Exception):
 
 def extract(blob: bytes, header: dict[str, Any], threshold: float, stride: int = 1) -> Surface:
     dims = [int(v) for v in header["dims"]]  # [nx, ny, nz]
-    spacing = [float(v) for v in header["spacing"]]  # (sx, sy, sz)
-    origin = [float(v) for v in header.get("origin", (0.0, 0.0, 0.0))]
+    basis, origin = world_transform(header)
 
     nx, ny, nz = dims
     expected = nx * ny * nz * 4
@@ -85,25 +123,26 @@ def extract(blob: bytes, header: dict[str, Any], threshold: float, stride: int =
             f"threshold {threshold:g} is outside the volume's range ({vmin:g} … {vmax:g})"
         )
 
-    # Spacing follows the array's axis order, which is (z, y, x) here.
+    # Index space, in voxel units. The affine below is what turns these into
+    # millimetres, and it carries the spacing itself — passing the spacing here
+    # as well would apply it twice and stretch the surface non-uniformly.
     verts, faces, _normals, _values = measure.marching_cubes(
         volume,
         level=threshold,
-        spacing=(spacing[2] * stride, spacing[1] * stride, spacing[0] * stride),
+        spacing=(stride, stride, stride),
     )
 
     if len(verts) == 0:
         raise SurfaceError(f"no surface found at {threshold:g}")
 
-    # (z, y, x) -> (x, y, z), then translate into the volume's world position so
-    # the mesh overlays the scan it came from.
+    # (z, y, x) -> (x, y, z), then through the header's own affine so the mesh
+    # overlays the scan it came from.
     reordered = np.column_stack((verts[:, 2], verts[:, 1], verts[:, 0]))
-    reordered += np.array(origin, dtype=np.float64)
-    faces = faces[:, ::-1]
+    world = reordered @ basis.T + origin
 
     return Surface(
-        vertices=reordered.astype(np.float32),
-        faces=faces.astype(np.int32),
+        vertices=world.astype(np.float32),
+        faces=_orient(faces, basis).astype(np.int32),
         threshold=float(threshold),
         stride=stride,
     )
@@ -135,7 +174,7 @@ def extract_labelled(
     """
     dims = [int(v) for v in header["dims"]]  # [nx, ny, nz]
     spacing = [float(v) for v in header["spacing"]]
-    origin = [float(v) for v in header.get("origin", (0.0, 0.0, 0.0))]
+    basis, origin = world_transform(header)
     nx, ny, nz = dims
 
     expected = nx * ny * nz * 4
@@ -159,11 +198,9 @@ def extract_labelled(
     if not present:
         raise SurfaceError("the mask has no voxels for the requested labels")
 
-    # Spacing follows the array's axis order, which is (z, y, x) here.
-    step_zyx = np.array(
-        [spacing[2] * stride, spacing[1] * stride, spacing[0] * stride], dtype=np.float64
-    )
-    origin_xyz = np.array(origin, dtype=np.float64)
+    # Marching cubes works in index space, and the affine is applied once at the
+    # end, so this is a pure voxel step — not the world spacing.
+    step_zyx = np.array([stride, stride, stride], dtype=np.float64)
 
     pieces: list[tuple[np.ndarray, np.ndarray, int]] = []
     counts: dict[int, int] = {}
@@ -185,11 +222,11 @@ def extract_labelled(
         if len(verts) == 0:
             continue
 
-        # Undo the window and the padding, then swap into (x, y, z). The winding
-        # reverses with the transposition or every normal points inward.
+        # Undo the window and the padding, swap into (x, y, z), then into world
+        # through the header's own affine.
         local = verts + (lo - 1) * step_zyx
-        local = np.column_stack((local[:, 2], local[:, 1], local[:, 0])) + origin_xyz
-        pieces.append((local, faces[:, ::-1], label_id))
+        local = np.column_stack((local[:, 2], local[:, 1], local[:, 0]))
+        pieces.append((local @ basis.T + origin, _orient(faces, basis), label_id))
         counts[label_id] = int(len(local))
 
     if not pieces:

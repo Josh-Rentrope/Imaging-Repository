@@ -344,19 +344,7 @@ def _iso_surface_labelled(
     header = json.loads(storage.get(segmentation["mask_header_ref"]).decode("utf-8"))
     legend = {int(k): str(v) for k, v in (header.get("legend") or {}).items()}
 
-    keep: set[int] | None = None
-    requested = params.get("label", "all")
-    if requested not in (None, "", "all"):
-        text = str(requested)
-        if text.lstrip("-").isdigit():
-            keep = {int(text)}
-        else:
-            keep = {label_id for label_id, name in legend.items() if name == text}
-        if not keep:
-            raise SurfaceError(
-                f"no label {text!r} in this mask. Available: "
-                + ", ".join(sorted(legend.values()))[:400]
-            )
+    keep = _resolve_labels(params.get("label"), legend)
 
     surface = extract_labelled(
         storage.get(segmentation["mask_ref"]),
@@ -461,6 +449,39 @@ def _iso_surface_threshold(envelope: dict, params: dict, context: dict) -> None:
         "stride": surface.stride,
         "bounds": _bounds(surface.vertices),
     }
+
+
+def _resolve_labels(requested: Any, legend: dict[int, str]) -> set[int] | None:
+    """Which labels to extract. None means every one of them.
+
+    Accepts a name, a label id, a list of either, or `"all"`. An empty list is
+    every label too — an empty filter is no filter, and it is what the form
+    sends when nothing has been narrowed down.
+    """
+    if requested in (None, "", "all"):
+        return None
+
+    if isinstance(requested, (list, tuple, set)):
+        items = [item for item in requested if str(item).strip()]
+        if not items:
+            return None
+    else:
+        items = [requested]
+
+    keep: set[int] = set()
+    for item in items:
+        text = str(item)
+        if text.lstrip("-").isdigit():
+            found = {int(text)}
+        else:
+            found = {label_id for label_id, name in legend.items() if name == text}
+        if not found:
+            raise SurfaceError(
+                f"no label {text!r} in this mask. Available: "
+                + ", ".join(sorted(legend.values()))[:400]
+            )
+        keep |= found
+    return keep
 
 
 def _bounds(vertices) -> list[float]:
