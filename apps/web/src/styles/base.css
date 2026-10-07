@@ -802,6 +802,150 @@ select {
   overflow-y: auto;
 }
 
+/* ── The samples modal ───────────────────────────────────────────────────── */
+
+/* Wider than the default: these are cards of prose, and at 920px a study's
+   description wraps to a column narrow enough to be tiring. */
+.modal-wide {
+  width: min(1180px, 94vw);
+  max-height: 88vh;
+}
+
+/* The list scrolls inside a fixed frame rather than the whole panel scrolling,
+   so the import form and the modality filter stay reachable while reading
+   through 28 studies. */
+.modal-wide .modal-body.column {
+  max-height: none;
+  overflow: hidden;
+  padding: 18px 22px 20px;
+}
+
+.modal-lede {
+  margin: 0 0 16px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.import-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.field.grow { flex: 1 1 360px; }
+.field.grow .text-input { width: 100%; }
+
+.samples-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 20px 0 8px;
+}
+
+.samples-count {
+  font-size: 11px;
+  font-weight: normal;
+}
+
+.chip-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+}
+
+.chip {
+  padding: 2px 10px;
+  border-radius: 11px;
+  font-size: 11px;
+}
+
+.chip-on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.sample-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0 4px 0 0;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  max-height: 44vh;
+  overflow-y: auto;
+}
+
+.sample-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 11px 13px;
+}
+
+.sample-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sample-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sample-desc {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-muted);
+}
+
+.sample-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+/* The attribution the CC BY licence requires. Quiet, but present and
+   clickable — a licence line without it does not satisfy the licence. */
+.sample-credit {
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--fg-muted);
+}
+
+.sample-credit a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+}
+
+.import-status { font-size: 11px; }
+
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 14px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.error-banner {
+  background: var(--control);
+  color: var(--danger);
+}
+
 /* ── Label tree ──────────────────────────────────────────────────────────── */
 
 .label-tree { margin: 2px 0 6px; }

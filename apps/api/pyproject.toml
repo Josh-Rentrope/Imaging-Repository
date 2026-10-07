@@ -38,6 +38,12 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.per-file-ignores]
+# Generated from the catalogue page's own JSON-LD. The long lines are study
+# descriptions quoted verbatim; re-wrapping them would edit the source text, and
+# the file is rewritten wholesale by tools/refresh_sample_catalogue.py anyway.
+"app/sample_catalogue.py" = ["E501"]
+
 [tool.pytest.ini_options]
 # skimage reaches into a numpy array's `.shape` in a way numpy 2.5 deprecated.
 # Third-party internals, not ours; filtered so the suite stays readable.

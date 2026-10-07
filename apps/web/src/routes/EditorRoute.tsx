@@ -8,6 +8,7 @@ import {
   PipelineSection,
   shapeFor,
   solverChoices,
+  suggestWorkflow,
   SURFACE_AFTER_MASK,
   workflowFor,
   type PipelineParams,
@@ -147,13 +148,13 @@ export default function EditorRoute() {
   // Changing source resets the run form and pre-selects that kind's operations.
   useEffect(() => {
     setError(null)
-    const suggested = activeSource ? DEFAULT_WORKFLOW[activeSource.kind] : 'ct'
+    const suggested = activeSource ? suggestWorkflow(activeSource) : DEFAULT_WORKFLOW.dicom
     setWorkflow(suggested)
     setSelectedOps(activeSource ? workflowFor(suggested).ops : [])
     // Structure names picked for one scan generally do not exist in another,
     // and the failure would only surface once the job had run.
     setParams((current) => ({ ...current, labels: null }))
-  }, [sourceId, activeSource?.kind])
+  }, [sourceId, activeSource?.kind, activeSource?.modality, activeSource?.renderable])
 
   // Changing workflow changes what the pipeline can do, so the ticks follow it
   // rather than leaving stages selected that this workflow does not offer.

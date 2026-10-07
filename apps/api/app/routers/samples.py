@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -15,10 +16,44 @@ from ..sources import SourceStore, to_summary
 
 router = APIRouter(tags=["samples"])
 
+#: Files examined when deciding what a dataset is. One hit is enough, and
+#: scanning a 400-file archive to answer a question the first few settle is work
+#: for nothing.
+SNIFF_FILES = 24
+
+#: Magic bytes for the formats a photogrammetry set is likely to hold.
+IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
+    (b"\xff\xd8\xff", "JPEG"),
+    (b"\x89PNG\r\n\x1a\n", "PNG"),
+    (b"II*\x00", "TIFF"),
+    (b"MM\x00*", "TIFF"),
+    (b"RIFF", "WebP"),
+)
+
+#: A Part 10 DICOM file starts with 128 bytes of padding and then `DICM`. The
+#: offset is the whole point of the preamble, and reading it from offset zero
+#: matches nothing a real file actually contains.
+DICOM_MAGIC = b"DICM"
+DICOM_PREAMBLE_AT = 128
+
+
+@dataclass
+class Detection:
+    """What the contents look like, and how sure that is.
+
+    `confident` is reported rather than hidden because the answer decides how
+    every file is read, and a guess presented as a fact is how a usable dataset
+    gets refused. When it is false the client is expected to ask.
+    """
+
+    kind: str
+    reason: str
+    confident: bool
+
 
 @router.get("/samples")
 def list_samples() -> dict:
-    """What the app can pull in for someone to try. Empty until a bucket is set."""
+    """What the app can pull in for someone to try."""
     return catalogue()
 
 
@@ -65,17 +100,30 @@ def import_remote(
     except RemoteError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    kind = request.kind if request.kind in ("dicom", "images") else _sniff(files)
+    detection = detect(files)
+    asked = request.kind if request.kind in ("dicom", "images") else None
+    kind = asked or detection.kind
     fallback = request.name or origin_of(request.url).rsplit("/", 1)[-1] or "Remote dataset"
 
     try:
         if kind == "dicom":
             record = store.create_dicom(files, request.workspace_id, request.set_id, fallback)
-            if not record.renderable and record.render_reason:
-                # A .zip of photographs is not a failed import; it is the other
-                # kind of source, and saying which is more useful than reporting
-                # that the volume could not be assembled.
+            if record.headerless:
+                # Not one file carried a DICOM header, so this really is the
+                # other kind of source and reading it as DICOM was wrong. The
+                # test is `headerless` and deliberately not `renderable`: a
+                # three-view chest X-ray and a mammogram are DICOM with no
+                # volume to assemble, and treating that as a misdetection threw
+                # away their headers and their modality to make them photographs.
+                #
+                # The DICOM record was persisted by `create_dicom` before we
+                # could look at it, so it is removed here. Leaving it would put a
+                # source in the list that no response ever mentioned — one import
+                # producing two entries, the wrong-looking one being the one
+                # nobody was told about.
+                store.delete(record.source_id)
                 record = store.create_images(files, request.workspace_id, request.set_id, fallback)
+                kind = "images"
         else:
             record = store.create_images(files, request.workspace_id, request.set_id, fallback)
     except Exception as exc:
@@ -89,19 +137,71 @@ def import_remote(
         **summary.model_dump(mode="json"),
         "imported_from": origin_of(request.url),
         "file_count": len(files),
+        # What was found and what was done with it are two different things: a
+        # caller can override the detection, and DICOM that cannot be assembled
+        # falls through to images. Reporting only one of them would hide both.
+        "detected": detection.kind,
+        "detected_reason": detection.reason,
+        "detected_confident": detection.confident,
+        "kind_used": kind,
+        "kind_overridden": asked is not None and asked != detection.kind,
     }
 
 
-def _sniff(files: list[tuple[str, bytes]]) -> str:
+def detect(files: list[tuple[str, bytes]]) -> Detection:
     """DICOM or photographs, decided by looking rather than by the file name.
 
-    An extension is a claim; a DICOM preamble is a fact. Only a handful of files
-    are examined — one hit is enough, and a whole-directory scan on a 4000-file
-    archive is work for nothing.
+    An extension is a claim; a DICOM preamble is a fact. Both possibilities are
+    counted over the first few files, and the answer is only reported as
+    confident when one is clearly ahead — a mixed archive, or one where nothing
+    is recognised at all, comes back unsure so the importer can say which it is.
+
+    Two DICOM checks, because there are two kinds of file. A Part 10 file
+    announces itself in its preamble; the older headerless kind carries no
+    marker at all and has to be recognised by its tags. Reading the preamble from
+    offset zero — which is where this started, and matches nothing a real file
+    contains — left `parse_file` carrying the whole load, so headerless files
+    were found and properly-formed ones without parseable tags were not.
     """
     from ..dicom import parse_file
 
-    for _name, payload in files[:24]:
-        if payload[:4] == b"DICM" or parse_file(payload) is not None:
-            return "dicom"
-    return "images"
+    dicom = 0
+    image = 0
+    image_format = "image"
+
+    for _name, payload in files[:SNIFF_FILES]:
+        if (
+            payload[DICOM_PREAMBLE_AT : DICOM_PREAMBLE_AT + 4] == DICOM_MAGIC
+            or parse_file(payload) is not None
+        ):
+            dicom += 1
+            continue
+        for magic, label in IMAGE_MAGIC:
+            if payload.startswith(magic):
+                image += 1
+                image_format = label
+                break
+
+    examined = min(len(files), SNIFF_FILES)
+
+    if dicom and not image:
+        return Detection("dicom", f"{dicom} of the first {examined} files are DICOM", True)
+    if image and not dicom:
+        return Detection(
+            "images", f"{image} of the first {examined} files are {image_format}", True
+        )
+    if dicom and image:
+        # Both present. The more common one wins, but this is a dataset that
+        # would be misread either way, so it is not claimed as certain.
+        lead = "dicom" if dicom > image else "images"
+        return Detection(
+            lead,
+            f"the archive holds both DICOM ({dicom}) and images ({image}); "
+            f"assuming {lead}",
+            False,
+        )
+    return Detection(
+        "images",
+        f"none of the first {examined} files is DICOM or a recognised image format",
+        False,
+    )

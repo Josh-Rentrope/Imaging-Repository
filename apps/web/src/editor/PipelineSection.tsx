@@ -56,6 +56,42 @@ export function workflowFor(id: string): Workflow {
   return WORKFLOWS.find((entry) => entry.id === id) ?? WORKFLOWS[0]
 }
 
+/** Enough of a source to guess its workflow from. */
+export interface WorkflowHint {
+  kind: 'dicom' | 'images'
+  modality: string | null
+  renderable: boolean
+}
+
+/**
+ * The workflow an upload most likely wants.
+ *
+ * `DEFAULT_WORKFLOW` maps by source kind, which is right for photographs and
+ * wrong for a good deal of DICOM: a chest X-ray and a mammogram are both single
+ * projections, not volumes, and handing them the CT workflow offers to assemble
+ * a series that has one slice in it. So the modality decides where it can, and
+ * volume-ness is taken from whether a volume was actually built rather than
+ * assumed from the kind.
+ *
+ * Nothing here is forced — the workflow selector is right there — it only picks
+ * the starting point.
+ */
+export function suggestWorkflow(source: WorkflowHint): string {
+  if (source.kind === 'images') return 'photos'
+
+  // A built volume is the one unambiguous signal that this is a stack.
+  if (source.renderable) return 'ct'
+
+  // Single-frame projections with a dedicated pipeline. Panoramic is the only
+  // one of those the app has, and it is genuinely modality-specific, so it is
+  // claimed only for the modality it belongs to.
+  if (source.modality === 'PX') return 'panoramic'
+
+  // Everything else — DX, MG, US, NM, PT, and DICOM that would not assemble —
+  // falls back to its kind's default and is left for the operator to correct.
+  return DEFAULT_WORKFLOW[source.kind]
+}
+
 const OP_HINTS: Record<string, string> = {
   [Op.ISOLATE_VOLUME]: 'Assemble the series into a volume',
   [Op.ISO_SURFACE]: 'Marching cubes at the threshold below — a bone surface',

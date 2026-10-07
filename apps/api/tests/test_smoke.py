@@ -1439,11 +1439,64 @@ def test_a_rar_says_what_is_missing_rather_than_failing_obscurely():
         monkey.download = original
 
 
-def test_the_samples_catalogue_is_honest_about_being_empty(client):
-    """Better an empty catalogue than one that offers a button which 404s."""
+def test_the_samples_catalogue_carries_the_attribution_cc_by_requires(client):
+    """The licence permits commercial use *with attribution*.
+
+    So the credit is a condition of shipping these, not a courtesy: an entry
+    offering "CC BY 4.0" without saying who to credit does not satisfy the
+    licence it names, and a reviewer has no way to tell which study it came from.
+    """
     body = client.get("/samples").json()
+    samples = body["samples"]
+
+    assert len(samples) >= 20, "the shipped catalogue should not be near-empty"
+    for sample in samples:
+        assert sample["available"], sample["id"]
+        assert sample["url"].startswith("https://"), sample["id"]
+        assert sample["licence"].startswith("CC BY"), sample["id"]
+        assert sample["collection"], sample["id"]
+        assert sample["source"], sample["id"]
+        assert sample["modality"], sample["id"]
+        # Sizes are read from the catalogue, so none should be missing — and a
+        # real one must not round to zero, which reads as a broken entry.
+        assert sample["bytes"] and sample["size_mb"] > 0, sample["id"]
+
+    assert body["modalities"] == ["CT", "DX", "MG", "MR", "NM", "PT", "US"]
+    # No bucket is set in tests, and the shipped catalogue does not need one.
     assert body["configured"] is False
-    assert body["samples"] == []
+
+
+def test_the_catalogue_refuses_a_non_commercial_licence():
+    """The generator is where a CC BY-NC study would have to get past.
+
+    Checked as a unit because it is the one place the mistake is cheap to stop:
+    once written into `sample_catalogue.py`, an NC study ships as usable.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "tools" / "refresh_sample_catalogue.py"
+    spec = importlib.util.spec_from_file_location("refresh", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    entry = {
+        "@id": "https://example.com/samples#nc-study",
+        "name": "A study that may not be used commercially",
+        "license": "https://creativecommons.org/licenses/by-nc/4.0/",
+        "keywords": "CT, Chest",
+        "distribution": [
+            {
+                "@type": "DataDownload",
+                "encodingFormat": "application/zip",
+                "contentUrl": "https://example.com/x.zip",
+                "contentSize": "100",
+            }
+        ],
+    }
+    with pytest.raises(SystemExit, match="not an allowed CC BY variant"):
+        module.build([entry])
 
 
 def test_importing_from_a_url_adds_a_normal_source(client, monkeypatch):
@@ -1529,3 +1582,255 @@ def test_the_remote_import_can_be_turned_off(tmp_path, monkeypatch):
     assert response.status_code == 403, response.text
     assert "BONE_VIEWER_ENABLE_REMOTE_FETCH" in response.json()["detail"]
     get_settings.cache_clear()
+
+
+# ── telling DICOM from photographs ──────────────────────────────────────────
+
+
+def test_detection_reports_what_it_saw_not_just_the_answer():
+    """The reason is the difference between a fact and a guess."""
+    from app.routers.samples import detect
+
+    dicom = detect([(f"{i}.dcm", b"\x00" * 128 + b"DICM" + b"\x00" * 64) for i in range(3)])
+    assert dicom.kind == "dicom"
+    assert dicom.confident is True
+    assert "3 of the first 3" in dicom.reason
+
+    photos = detect([(f"{i}.jpg", b"\xff\xd8\xff\xe0" + b"x" * 40) for i in range(4)])
+    assert photos.kind == "images"
+    assert photos.confident is True
+    assert "JPEG" in photos.reason
+
+
+def test_a_mixed_archive_is_reported_as_unsure():
+    """This is the case the manual override exists for.
+
+    Claiming certainty about a set that is genuinely both would silently pick
+    one reading and mis-handle the other half of the files.
+    """
+    from app.routers.samples import detect
+
+    files = [
+        ("a.dcm", b"\x00" * 128 + b"DICM" + b"\x00" * 64),
+        ("b.jpg", b"\xff\xd8\xff\xe0" + b"x" * 40),
+        ("c.jpg", b"\xff\xd8\xff\xe0" + b"y" * 40),
+    ]
+    found = detect(files)
+    assert found.kind == "images"  # the more common of the two
+    assert found.confident is False
+    assert "both" in found.reason
+
+
+def test_an_unrecognisable_archive_says_so(client, monkeypatch):
+    """Nothing matched, so the answer is a guess and is labelled as one."""
+    from app import fetch
+    from app.routers.samples import detect
+
+    found = detect([("notes.txt", b"just some text, no header at all")])
+    assert found.kind == "images"
+    assert found.confident is False
+    assert "none of the first 1 files is DICOM" in found.reason
+
+    # And the same verdict travels back through the endpoint.
+    monkeypatch.setattr(fetch, "download", lambda url: b"just some text")
+    response = client.post(
+        "/sources/remote",
+        json={"url": "https://example.com/mystery.zip", "workspace_id": "w", "set_id": "s"},
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["detected"] == "images"
+    assert body["detected_confident"] is False
+    assert body["kind_overridden"] is False
+
+
+def test_an_explicit_kind_beats_detection_and_is_recorded_as_such(client, monkeypatch):
+    """The person importing knows what they put in the archive."""
+    from app import fetch
+
+    payload = b"\x00" * 128 + b"DICM" + b"\x00" * 64
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("scan.dcm", payload)
+    monkeypatch.setattr(fetch, "download", lambda url: buffer.getvalue())
+
+    response = client.post(
+        "/sources/remote",
+        json={
+            "url": "https://example.com/scan.zip",
+            "workspace_id": "w",
+            "set_id": "s",
+            # Detection would say dicom; the caller says photographs. The caller
+            # wins, and the response says the two disagreed.
+            "kind": "images",
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["detected"] == "dicom"
+    assert body["kind_used"] == "images"
+    assert body["kind_overridden"] is True
+    assert body["imported_from"] == "https://example.com/scan.zip"
+
+
+def test_dicom_that_will_not_assemble_stays_dicom(client, monkeypatch):
+    """A three-view chest X-ray is DICOM and has no volume to assemble.
+
+    The fallback to images keys off `headerless` — whether any file parsed as
+    DICOM — and not off `renderable`. Keying it off `renderable` meant every
+    single-frame study the catalogue offers was quietly reclassified as
+    photographs, losing the DICOM header and the modality on the way.
+    """
+    from app import fetch
+
+    # A real header, not just a preamble: `headerless` is about whether the
+    # files *parse*, and a preamble with no tags parses as nothing.
+    payload = _dicom_bytes(
+        [
+            (0x0008, 0x0060, b"CS", b"DX"),
+            (0x0028, 0x0010, b"US", struct.pack("<H", 512)),
+            (0x0028, 0x0011, b"US", struct.pack("<H", 512)),
+        ]
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("pa.dcm", payload)
+    monkeypatch.setattr(fetch, "download", lambda url: buffer.getvalue())
+
+    response = client.post(
+        "/sources/remote",
+        json={"url": "https://example.com/one.zip", "workspace_id": "w", "set_id": "s"},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["detected"] == "dicom"
+    assert body["kind"] == "dicom"
+    assert body["kind_used"] == "dicom"
+    assert body["kind_overridden"] is False
+    # The header survived, which is the thing the old fallback destroyed.
+    assert body["modality"] == "DX"
+    assert body["headerless"] is False
+
+
+def test_headers_that_are_not_dicom_at_all_fall_through_to_images(client, monkeypatch):
+    """The case the fallback is actually for: the detection was simply wrong.
+
+    Nothing here is DICOM, so reading it as DICOM got nowhere — and the honest
+    answer is that this is the other kind of source rather than an error.
+    """
+    from app import fetch
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("photo.jpg", b"\xff\xd8\xff\xe0" + b"x" * 64)
+    monkeypatch.setattr(fetch, "download", lambda url: buffer.getvalue())
+
+    response = client.post(
+        "/sources/remote",
+        json={
+            "url": "https://example.com/photos.zip",
+            "workspace_id": "w",
+            "set_id": "s",
+            # Detection would say images; the caller insists on DICOM, and is
+            # wrong. The fallback corrects it rather than failing the import.
+            "kind": "dicom",
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["detected"] == "images"
+    assert body["kind_used"] == "images"
+    assert body["kind_overridden"] is True
+
+
+def _implicit_vr_bytes(tags: list[tuple[int, int, bytes]]) -> bytes:
+    """A minimal Part 10 file whose dataset is Implicit VR Little Endian."""
+    out = bytearray(b"\x00" * 128 + b"DICM")
+
+    def element(group: int, elem: int, vr: bytes, value: bytes) -> None:
+        out.extend(struct.pack("<HH", group, elem) + vr)
+        if vr in (b"OB", b"OW", b"SQ", b"UN", b"UT"):
+            out.extend(b"\x00\x00" + struct.pack("<I", len(value)))
+        else:
+            out.extend(struct.pack("<H", len(value)))
+        out.extend(value)
+
+    # The meta group is explicit VR whatever the dataset is, and names the
+    # transfer syntax the dataset uses.
+    element(0x0002, 0x0010, b"UI", b"1.2.840.10008.1.2\x00")
+
+    # From here: no VR, just element then a 4-byte length.
+    for group, elem, value in tags:
+        out.extend(struct.pack("<HH", group, elem) + struct.pack("<I", len(value)) + value)
+    return bytes(out)
+
+
+def test_implicit_vr_files_are_read_rather_than_mistaken_for_photographs():
+    """The encoding that was silently costing whole collections.
+
+    Implicit VR stores no VR field, and the reader used to bail on it — so every
+    file came back None, which the importer read as "not DICOM at all". A real
+    251-slice chest CT became a folder of photographs. The LIDC-IDRI studies are
+    encoded this way, which is how it was found.
+    """
+    data = _implicit_vr_bytes(
+        [
+            (0x0008, 0x0060, b"CT"),
+            (0x0020, 0x000E, b"1.2.3.4.5"),
+            (0x0028, 0x0010, struct.pack("<H", 512)),
+            (0x0028, 0x0011, struct.pack("<H", 512)),
+        ]
+    )
+    header = parse_file(data)
+
+    assert header is not None, "an implicit-VR file must not read as nothing"
+    assert header.modality == "CT"
+    assert header.series_uid == "1.2.3.4.5"
+    # Rows and Columns are binary US, not ASCII. Read as text they would still
+    # produce a number, which is why this is asserted rather than assumed.
+    assert header.rows == 512
+    assert header.columns == 512
+    assert header.transfer_syntax == "1.2.840.10008.1.2"
+
+
+def test_an_unreadable_transfer_syntax_is_refused_not_guessed():
+    """Big endian and deflated are refused rather than read with the wrong rules.
+
+    A header decoded with the wrong byte order is wrong in a way that still looks
+    like a header, which is worse than no header at all.
+    """
+    for uid in (b"1.2.840.10008.1.2.2\x00", b"1.2.840.10008.1.2.1.99\x00"):
+        out = bytearray(b"\x00" * 128 + b"DICM")
+        out.extend(struct.pack("<HH", 0x0002, 0x0010) + b"UI" + struct.pack("<H", len(uid)) + uid)
+        out.extend(struct.pack("<HH", 0x0008, 0x0060) + struct.pack("<I", 2) + b"CT")
+        assert parse_file(bytes(out)) is None, uid
+
+
+def test_an_import_that_falls_back_leaves_no_orphan_source(client, monkeypatch):
+    """One import, one source.
+
+    `create_dicom` persists the record before the fallback can inspect it, so the
+    abandoned attempt has to be removed — otherwise the list shows two sources
+    for one import and the extra one is the one nobody was told about.
+    """
+    from app import fetch
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("photo.jpg", b"\xff\xd8\xff\xe0" + b"x" * 64)
+    monkeypatch.setattr(fetch, "download", lambda url: buffer.getvalue())
+
+    response = client.post(
+        "/sources/remote",
+        json={
+            "url": "https://example.com/photos.zip",
+            "workspace_id": "w",
+            "set_id": "s",
+            "kind": "dicom",  # wrong on purpose, so the fallback runs
+        },
+    )
+    assert response.status_code == 201, response.text
+
+    listed = client.get("/sources?workspace_id=w&set_id=s").json()
+    assert len(listed) == 1, [entry["name"] for entry in listed]
+    assert listed[0]["source_id"] == response.json()["source_id"]

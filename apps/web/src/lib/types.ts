@@ -237,7 +237,20 @@ export interface SampleEntry {
   /** Shown beside the download, so the terms travel with the data. */
   licence: string
   size_mb: number | null
+  /** Exact size, so the display does not round a small study to "0 MB". */
+  bytes: number | null
   kind: string
+  modality: string | null
+  anatomy: string | null
+  /**
+   * Who it came from and how to cite it.
+   *
+   * These are not decoration: a CC BY licence permits commercial use *with
+   * attribution*, so showing the licence without these does not satisfy it.
+   */
+  collection: string | null
+  source: string | null
+  doi: string | null
   notes: string | null
   tags: string[]
   /** False when this deployment has no bucket configured for it. */
@@ -248,12 +261,22 @@ export interface SamplesCatalogue {
   configured: boolean
   base: string | null
   samples: SampleEntry[]
+  /** Modalities present in the catalogue, for filtering. */
+  modalities: string[]
 }
 
 /** A source, plus where it came from when it was fetched rather than uploaded. */
 export interface ImportedSource extends SourceSummary {
   imported_from?: string
   file_count?: number
+  /** What the contents looked like. */
+  detected?: SourceKind
+  detected_reason?: string
+  /** False when the archive was mixed or unrecognised. */
+  detected_confident?: boolean
+  /** What was actually created, which differs when detection was overridden. */
+  kind_used?: SourceKind
+  kind_overridden?: boolean
 }
 
 /** What a camera-pose solver will accept. A sequence is not an unordered set. */

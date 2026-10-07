@@ -24,6 +24,7 @@ import type {
   SamplesCatalogue,
   SolversResponse,
   SourceImages,
+  SourceKind,
   SourceSummary,
   VolumePayload,
 } from './types'
@@ -153,6 +154,8 @@ export const api = {
     workspace_id: string
     set_id: string
     name?: string
+    /** Omit to let the server decide from the contents. */
+    kind?: SourceKind
   }) =>
     request<ImportedSource>('/sources/remote', {
       method: 'POST',
