@@ -8,6 +8,7 @@ wrong answer.
 from __future__ import annotations
 
 import io
+import json
 import struct
 import zipfile
 
@@ -15,6 +16,8 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from pydicom.dataset import Dataset, FileMetaDataset
+from pathlib import Path
+
 from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
 
 from app.dicom import parse_file
@@ -490,3 +493,272 @@ def test_iso_surface_names_a_missing_source(client):
     assert job["status"] == "failed"
     error = job["error"] or ""
     assert "no source" in error and "Re-upload" in error
+
+
+# ── TotalSegmentator plumbing ───────────────────────────────────────────────
+#
+# Driven through tests/stub_totalseg.py so command construction, NIfTI axis
+# handling, legend parsing and mask storage are exercised without a PyTorch
+# install. The real binary is never required by the suite.
+
+STUB_SEGMENTER = Path(__file__).parent / "stub_totalseg.py"
+
+
+def use_stub_segmenter(monkeypatch) -> None:
+    """Point both the segmenter and its info companion at the stub."""
+    monkeypatch.setenv("BONE_VIEWER_TOTALSEGMENTATOR", str(STUB_SEGMENTER))
+    monkeypatch.setenv("BONE_VIEWER_TOTALSEG_INFO", str(STUB_SEGMENTER))
+
+
+def run_segment(client, source_id: str, **params):
+    return client.post(
+        "/jobs",
+        json={
+            "stages": [{"op": "segment", "params": params}],
+            "capture": {"source_id": source_id},
+        },
+    ).json()
+
+
+def test_segment_without_a_segmenter_explains_how_to_install(client, monkeypatch):
+    # Point at a path that does not exist rather than relying on TotalSegmentator
+    # being absent. Whether it is installed is a property of the machine, and a
+    # test that only passes on a bare machine tests nothing.
+    monkeypatch.setenv("BONE_VIEWER_TOTALSEGMENTATOR", str(Path("does") / "not" / "exist"))
+    monkeypatch.delenv("BONE_VIEWER_TOTALSEG_INFO", raising=False)
+    series_uid = generate_uid()
+    source = upload_dicom(client, [("s.dcm", make_slice(0, series_uid, block=True))]).json()
+
+    job = run_segment(client, source["source_id"])
+    assert job["status"] == "failed"
+    error = job["error"] or ""
+    assert "TotalSegmentator" in error and "install" in error.lower()
+
+
+def test_segment_produces_a_mask_and_a_legend(client, monkeypatch):
+    use_stub_segmenter(monkeypatch)
+    source = upload_blocky_series(client, slices=6, rows=24, cols=24)
+
+    job = run_segment(client, source["source_id"])
+    assert job["status"] == "succeeded", job["error"]
+
+    seg = job["result"]["segmentation"]
+    assert seg["kind"] == "volumetric"
+    assert [c["name"] for c in seg["classes"]] == ["rib_left_4", "rib_left_5"]
+    assert all(c["volume"] > 0 for c in seg["classes"])
+
+    mask = next(a for a in job["result"]["artifacts"] if a["kind"] == "mask")
+    header = json.loads(
+        client.get("/artifacts/" + seg["mask_header_ref"].split("://", 1)[1]).content
+    )
+    assert header["labels"] == [1, 2]
+    assert header["legend"]["1"] == "rib_left_4"
+
+    blob = client.get("/artifacts/" + mask["ref"].split("://", 1)[1]).content
+    assert len(blob) == header["byte_length"] == 24 * 24 * 6 * 4
+
+
+def test_segment_mask_keeps_its_axis_order(client, monkeypatch):
+    """The stub splits the volume along z, so a transposed mask shows up here.
+
+    NIfTI is (x, y, z) and we store (nz, ny, nx); getting that wrong is silent
+    and would put every label in the wrong place.
+    """
+    use_stub_segmenter(monkeypatch)
+    source = upload_blocky_series(client, slices=6, rows=24, cols=24)
+    job = run_segment(client, source["source_id"])
+
+    seg = job["result"]["segmentation"]
+    header = json.loads(
+        client.get("/artifacts/" + seg["mask_header_ref"].split("://", 1)[1]).content
+    )
+    blob = client.get("/artifacts/" + seg["mask_ref"].split("://", 1)[1]).content
+
+    # Storage is (nz, ny, nx); taking the dims from the header rather than
+    # assuming them is the point, since a wrong reshape of the right element
+    # count fails silently.
+    nz, ny, nx = header["dims"][2], header["dims"][1], header["dims"][0]
+    mask = np.frombuffer(blob, dtype="<i4").reshape(nz, ny, nx)
+
+    # Label 1 occupies the low-z third, label 2 the middle third.
+    assert mask[0, 0, 0] == 1
+    assert mask[2, 0, 0] == 2
+    assert (mask == 1).sum() == 24 * 24 * 2
+    assert (mask == 2).sum() == 24 * 24 * 2
+
+
+def test_image_set_segment_stays_synthetic(client):
+    """No volume means no volumetric segmenter; the dental path is unchanged."""
+    response = client.post(
+        "/sources/images",
+        files=[("files", ("a.jpg", b"\xff\xd8\xff\xe0jpeg", "image/jpeg"))],
+        data={"workspace_id": "ws-1", "set_id": "set-1"},
+    )
+    source = response.json()
+    job = client.post(
+        "/jobs",
+        json={"stages": [{"op": "segment"}], "capture": {"source_id": source["source_id"]}},
+    ).json()
+    assert job["status"] == "succeeded", job["error"]
+    assert job["result"]["segmentation"]["instances"]
+
+
+# ── labelled surfaces (segment -> iso_surface in one job) ───────────────────
+
+
+def run_labelled_surface(client, monkeypatch, **params):
+    use_stub_segmenter(monkeypatch)
+    source = upload_blocky_series(client, slices=9, rows=24, cols=24)
+    return client.post(
+        "/jobs",
+        json={
+            "stages": [{"op": "segment"}, {"op": "iso_surface", "params": params}],
+            "capture": {"source_id": source["source_id"]},
+        },
+    ).json()
+
+
+def test_chained_stages_produce_a_surface_with_labels(client, monkeypatch):
+    job = run_labelled_surface(client, monkeypatch)
+    assert job["status"] == "succeeded", job["error"]
+    result = job["result"]
+    assert result["ops"] == ["segment", "iso_surface"]
+
+    mesh = next(a for a in result["artifacts"] if a["kind"] == "mesh")
+    labels = next(a for a in result["artifacts"] if a["kind"] == "labels")
+
+    # One int32 per vertex, and the counts must agree with the mesh.
+    assert labels["vertices"] == mesh["vertices"]
+    blob = client.get("/artifacts/" + labels["ref"].split("://", 1)[1]).content
+    assert len(blob) == mesh["vertices"] * 4
+
+    header = json.loads(
+        client.get("/artifacts/" + labels["header_ref"].split("://", 1)[1]).content
+    )
+    assert header["kind"] == "vertex"
+    assert header["legend"] == {"1": "rib_left_4", "2": "rib_left_5"}
+
+
+def test_every_vertex_carries_a_known_label(client, monkeypatch):
+    """A surface extracted from a mask must not have unlabelled vertices.
+
+    The stub's two labels sit flush against each other, which is the case that
+    catches the obvious implementation: extracting the boundary of the union
+    gives label 1 no geometry at all, because it never touches background, so it
+    can neither be seen nor clicked. Every label with voxels must come back.
+    """
+    job = run_labelled_surface(client, monkeypatch)
+    mesh = next(a for a in job["result"]["artifacts"] if a["kind"] == "mesh")
+    labels = next(a for a in job["result"]["artifacts"] if a["kind"] == "labels")
+
+    values = np.frombuffer(
+        client.get("/artifacts/" + labels["ref"].split("://", 1)[1]).content, dtype="<i4"
+    )
+    assert len(values) == mesh["vertices"]
+    assert set(np.unique(values).tolist()) == {1, 2}
+
+
+def test_the_volume_fallback_is_in_mm3(tmp_path):
+    """A bare voxel count reported as mm^3 is wrong by the voxel size.
+
+    It looks entirely plausible, which is the problem: a 0.5x0.5x2.0 mm CT would
+    understate every volume eightfold and nothing downstream could tell.
+    """
+    from app.pipeline.totalseg import _statistics
+
+    labels = np.zeros((4, 4, 4), dtype=np.int32)
+    labels[:2] = 1  # 2 * 4 * 4 = 32 voxels
+
+    volumes = _statistics(tmp_path, labels, {1: "rib_left_4"}, (0.5, 0.5, 2.0))
+    assert volumes == {"rib_left_4": 32 * 0.5 * 0.5 * 2.0}
+
+
+def test_the_legend_comes_from_the_configured_segmenter(client, monkeypatch):
+    """Configuring only the segmenter must not source class names from PATH.
+
+    A machine with a real TotalSegmentator installed would otherwise answer for
+    a stand-in's mask and rename every label after the wrong anatomy — the mask
+    and its legend would both look valid and disagree.
+    """
+    use_stub_segmenter(monkeypatch)
+    monkeypatch.delenv("BONE_VIEWER_TOTALSEG_INFO")
+
+    job = run_segment(client, upload_blocky_series(client)["source_id"])
+    assert job["status"] == "succeeded", job["error"]
+
+    legend = json.loads(
+        client.get(
+            "/artifacts/"
+            + next(
+                a for a in job["result"]["artifacts"] if a["kind"] == "mask"
+            )["header_ref"].split("://", 1)[1]
+        ).content
+    )["legend"]
+    assert legend == {"1": "rib_left_4", "2": "rib_left_5"}
+
+
+def test_the_task_selects_the_class_list(client, monkeypatch):
+    """`teeth` and `total` number their labels differently.
+
+    Asking the info companion for the wrong task's list still returns names, so
+    a missing `-ta` would rename structures rather than fail.
+    """
+    use_stub_segmenter(monkeypatch)
+
+    job = run_segment(client, upload_blocky_series(client)["source_id"], task="teeth")
+    assert job["status"] == "succeeded", job["error"]
+
+    header = json.loads(
+        client.get(
+            "/artifacts/"
+            + next(
+                a for a in job["result"]["artifacts"] if a["kind"] == "mask"
+            )["header_ref"].split("://", 1)[1]
+        ).content
+    )
+    assert header["task"] == "teeth"
+    assert header["legend"] == {"1": "upper_tooth_11", "2": "upper_tooth_12"}
+
+
+def test_touching_labels_meet_at_the_same_plane(client, monkeypatch):
+    """Adjacent labels must share a seam, not overlap or leave a gap.
+
+    Each label is extracted in its own bounding box, so the two passes reach the
+    shared boundary from opposite sides — one clamped at the array edge, one with
+    a margin. If the window offset is off by a voxel the surfaces separate or
+    interpenetrate, and the seam is the only place that shows it.
+    """
+    first = run_labelled_surface(client, monkeypatch, label="rib_left_4")
+    second = run_labelled_surface(client, monkeypatch, label="rib_left_5")
+    assert first["status"] == "succeeded", first["error"]
+    assert second["status"] == "succeeded", second["error"]
+
+    # bounds are [xmin, xmax, ymin, ymax, zmin, zmax]; the stub's labels are
+    # stacked along z, which is the axis they touch on.
+    below = first["result"]["geometry"]["bounds"]
+    above = second["result"]["geometry"]["bounds"]
+    assert below[5] == pytest.approx(above[4], abs=1e-4)
+    assert above[5] > below[5]
+
+
+def test_label_param_restricts_the_surface(client, monkeypatch):
+    job = run_labelled_surface(client, monkeypatch, label="rib_left_4")
+    assert job["status"] == "succeeded", job["error"]
+
+    labels = next(a for a in job["result"]["artifacts"] if a["kind"] == "labels")
+    header = json.loads(
+        client.get("/artifacts/" + labels["header_ref"].split("://", 1)[1]).content
+    )
+    assert set(header["legend"].keys()) == {"1"}
+
+    values = np.frombuffer(
+        client.get("/artifacts/" + labels["ref"].split("://", 1)[1]).content, dtype="<i4"
+    )
+    assert set(np.unique(values).tolist()) == {1}
+
+
+def test_unknown_label_names_the_available_ones(client, monkeypatch):
+    job = run_labelled_surface(client, monkeypatch, label="rib_right_9")
+    assert job["status"] == "failed"
+    error = job["error"] or ""
+    assert "rib_right_9" in error and "rib_left_4" in error

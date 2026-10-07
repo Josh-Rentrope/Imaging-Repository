@@ -140,6 +140,10 @@ class SourceStore:
     def _index(self, source_id: str) -> Path:
         return self._dir(source_id) / "index.json"
 
+    def directory(self, source_id: str) -> Path:
+        """Where a source's uploaded files live. Passed straight to external tools."""
+        return self._dir(source_id) / "files"
+
     # -- reads --------------------------------------------------------------
 
     def get(self, source_id: str) -> SourceRecord | None:

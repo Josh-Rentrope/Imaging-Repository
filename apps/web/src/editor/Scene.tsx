@@ -14,6 +14,7 @@ import vtkOrientationMarkerWidget from '@kitware/vtk.js/Interaction/Widgets/Orie
 import { Corners } from '@kitware/vtk.js/Interaction/Widgets/OrientationMarkerWidget/Constants'
 import vtkActor from '@kitware/vtk.js/Rendering/Core/Actor'
 import vtkAxesActor from '@kitware/vtk.js/Rendering/Core/AxesActor'
+import vtkCellPicker from '@kitware/vtk.js/Rendering/Core/CellPicker'
 import vtkColorTransferFunction from '@kitware/vtk.js/Rendering/Core/ColorTransferFunction'
 import vtkMapper from '@kitware/vtk.js/Rendering/Core/Mapper'
 import vtkVolume from '@kitware/vtk.js/Rendering/Core/Volume'
@@ -45,11 +46,33 @@ export interface SceneSurface {
   /** Whether the cutting planes apply to this surface. */
   clipped: boolean
   color: [number, number, number]
+  /** Per-vertex label sidecar, for a surface that came out of a segmentation. */
+  labelsRef: string | null
+  labelsHeaderRef: string | null
 }
 
 export interface SceneModel {
   volume: SceneVolume | null
   surfaces: SceneSurface[]
+}
+
+/** What a click on labelled geometry resolved to. */
+export interface SceneSelection {
+  surfaceId: string
+  label: number
+  /** Human name from the segmentation legend, or a stand-in when it has none. */
+  name: string
+  /** Vertices carrying this label, so the popup can say how much was picked. */
+  vertices: number
+  /** Where the click landed, in CSS pixels from the viewport's top-left. */
+  x: number
+  y: number
+}
+
+interface VertexLabels {
+  values: Int32Array
+  legend: Record<string, string>
+  counts: Record<string, number>
 }
 
 interface VolumeHeader {
@@ -86,6 +109,10 @@ interface SurfaceEntry {
   actor: ReturnType<typeof vtkActor.newInstance>
   mapper: ReturnType<typeof vtkMapper.newInstance>
   reader: { delete(): void }
+  labels: VertexLabels | null
+  /** Per-vertex RGB, allocated on the first selection. */
+  colours: Uint8Array | null
+  colourArray: ReturnType<typeof vtkDataArray.newInstance> | null
 }
 
 interface Ctx {
@@ -101,6 +128,7 @@ interface Ctx {
   surfaces: Map<string, SurfaceEntry>
   marker: ReturnType<typeof vtkOrientationMarkerWidget.newInstance> | null
   axes: ReturnType<typeof vtkAxesActor.newInstance> | null
+  picker: ReturnType<typeof vtkCellPicker.newInstance>
   /** False until something has been framed, so the first load can reset the camera. */
   framed: boolean
 }
@@ -108,10 +136,55 @@ interface Ctx {
 const AXIS_INDEX: Record<Axis, 0 | 1 | 2> = { x: 0, y: 1, z: 2 }
 const AXES: Axis[] = ['x', 'y', 'z']
 
+/**
+ * How far the pointer may travel and still count as a click. Orbiting is a drag
+ * that starts and ends on the model, so without this every rotation would
+ * select whatever was under the button when it came up.
+ */
+const CLICK_SLOP_PX = 4
+
+/** Labels other than the selected one, so a pick reads as one structure. */
+const DIMMED: [number, number, number] = [104, 112, 122]
+
 async function fetchBytes(ref: string): Promise<ArrayBuffer> {
   const response = await fetch(artifactUrl(ref))
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
   return response.arrayBuffer()
+}
+
+/**
+ * Fetch the per-vertex labels for a surface, checked against the mesh it
+ * belongs to.
+ *
+ * The values arrive as a bare binary array with the legend and the per-label
+ * tallies in a companion JSON. They cannot ride along in the PLY: the reader
+ * here ignores face properties and cell data without saying so, so a mesh that
+ * looked labelled would come back unlabelled and silent.
+ *
+ * The length check is the point of this function. One int32 per vertex is the
+ * whole contract, and a sidecar from a different extraction would still parse
+ * cleanly and then label the wrong vertices.
+ */
+async function loadVertexLabels(
+  surface: SceneSurface,
+  pointCount: number,
+): Promise<VertexLabels | null> {
+  if (!surface.labelsRef) return null
+
+  const blob = await fetchBytes(surface.labelsRef)
+  if (blob.byteLength !== pointCount * 4) return null
+
+  let header: { legend?: Record<string, string>; counts?: Record<string, number> } | null = null
+  if (surface.labelsHeaderRef) {
+    const response = await fetch(artifactUrl(surface.labelsHeaderRef))
+    if (response.ok) header = await response.json()
+  }
+
+  return {
+    values: new Int32Array(blob),
+    legend: header?.legend ?? {},
+    counts: header?.counts ?? {},
+  }
 }
 
 /**
@@ -190,6 +263,93 @@ function createPlaneVisuals(renderer: Ctx['renderer']): Record<Axis, PlaneVisual
   }
 
   return visuals
+}
+
+/**
+ * The cell topology picking needs. `getInputData` is typed as a bare DataSet,
+ * and cells only exist on the polydata both readers produce.
+ */
+interface CellTopology {
+  getCellPoints(cellId: number): { cellPointIds: ArrayLike<number> | null } | null
+}
+
+function canvasOf(
+  generic: ReturnType<typeof vtkGenericRenderWindow.newInstance>,
+): HTMLCanvasElement | null {
+  const view = generic.getRenderWindow().getViews()[0]
+  return (view?.getCanvas?.() as HTMLCanvasElement | undefined) ?? null
+}
+
+/**
+ * Device pixels per CSS pixel. vtk reports pointer positions in canvas pixels
+ * with y measured up from the bottom, so a click's position in the page needs
+ * both the scale and the flip undone.
+ */
+function devicePixelScale(
+  generic: ReturnType<typeof vtkGenericRenderWindow.newInstance>,
+): number {
+  const canvas = canvasOf(generic)
+  const rect = canvas?.getBoundingClientRect()
+  if (!canvas || !rect || rect.width === 0) return window.devicePixelRatio || 1
+  return canvas.width / rect.width
+}
+
+function selectAt(
+  ctx: Ctx | null,
+  screenX: number,
+  screenY: number,
+  report: (selection: SceneSelection | null) => void,
+): void {
+  if (!ctx) return
+
+  ctx.picker.pick([screenX, screenY, 0], ctx.renderer)
+  const cellId = ctx.picker.getCellId()
+  const mapper = ctx.picker.getMapper()
+
+  let entry: SurfaceEntry | null = null
+  let entryKey = ''
+  for (const [id, candidate] of ctx.surfaces) {
+    if (candidate.mapper === mapper) {
+      entry = candidate
+      entryKey = id
+    }
+  }
+
+  // A miss, or a hit on unlabelled geometry: either way whatever was selected
+  // before is no longer what the pointer is on.
+  if (cellId < 0 || !mapper || !entry?.labels) {
+    report(null)
+    return
+  }
+
+  const data = (mapper as unknown as { getInputData(): CellTopology | null }).getInputData()
+  const pointId = data?.getCellPoints(cellId)?.cellPointIds?.[0]
+
+  // Any vertex of the cell answers for it: each label is extracted as its own
+  // closed mesh, so a triangle never straddles two of them.
+  if (pointId == null || pointId >= entry.labels.values.length) {
+    report(null)
+    return
+  }
+
+  const label = entry.labels.values[pointId]
+  if (label === 0) {
+    report(null)
+    return
+  }
+
+  const rect = canvasOf(ctx.generic)?.getBoundingClientRect()
+  const scale = devicePixelScale(ctx.generic)
+  const legend = entry.labels.legend[String(label)]
+
+  report({
+    surfaceId: entryKey,
+    label,
+    name: legend ?? `Label ${label}`,
+    vertices: entry.labels.counts[String(label)] ?? 0,
+    x: rect ? screenX / scale : screenX,
+    y: rect ? rect.height - screenY / scale : screenY,
+  })
 }
 
 function applyClipFlags(ctx: Ctx, model: SceneModel) {
@@ -273,12 +433,27 @@ function applyPlanes(ctx: Ctx, settings: ViewportSettings) {
   }
 }
 
-export function Scene({ model, settings }: { model: SceneModel; settings: ViewportSettings }) {
+export function Scene({
+  model,
+  settings,
+  selection,
+  onSelect,
+}: {
+  model: SceneModel
+  settings: ViewportSettings
+  selection: SceneSelection | null
+  onSelect: (selection: SceneSelection | null) => void
+}) {
   const containerRef = useRef<HTMLDivElement>(null)
   const ctxRef = useRef<Ctx | null>(null)
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [revision, setRevision] = useState(0)
+
+  // The pick handlers are bound to the interactor once, at mount, so they
+  // cannot close over a prop that changes every render.
+  const onSelectRef = useRef(onSelect)
+  onSelectRef.current = onSelect
 
   const volumeKey = model.volume ? `${model.volume.headerRef}|${model.volume.binRef}` : ''
   const surfaceKey = model.surfaces.map((s) => `${s.id}:${s.meshRef}`).join(',')
@@ -295,6 +470,12 @@ export function Scene({ model, settings }: { model: SceneModel; settings: Viewpo
     const renderer = generic.getRenderer()
     const renderWindow = generic.getRenderWindow()
 
+    const picker = vtkCellPicker.newInstance()
+    // Fraction of the window diagonal. The default 0.025 is a wide net for
+    // geometry this thin; a hair under half a percent keeps a click on a rib
+    // from reaching through to the one behind it.
+    picker.setTolerance(0.004)
+
     ctxRef.current = {
       generic,
       renderer,
@@ -308,8 +489,33 @@ export function Scene({ model, settings }: { model: SceneModel; settings: Viewpo
       surfaces: new Map(),
       marker: null,
       axes: null,
+      picker,
       framed: false,
     }
+
+    const interactor = renderWindow.getInteractor()
+    let pressedAt: { x: number; y: number } | null = null
+
+    const onPress = (event: { position: { x: number; y: number } }) => {
+      pressedAt = { x: event.position.x, y: event.position.y }
+    }
+
+    const onRelease = (event: { position: { x: number; y: number } }) => {
+      const start = pressedAt
+      pressedAt = null
+      if (!start) return
+
+      const { x, y } = event.position
+      const travelled = Math.hypot(x - start.x, y - start.y)
+      if (travelled > CLICK_SLOP_PX * devicePixelScale(generic)) return
+
+      selectAt(ctxRef.current, x, y, (picked) => onSelectRef.current(picked))
+    }
+
+    const subscriptions = [
+      interactor.onLeftButtonPress(onPress),
+      interactor.onLeftButtonRelease(onRelease),
+    ]
 
     const observer = new ResizeObserver(() => {
       generic.resize()
@@ -321,6 +527,7 @@ export function Scene({ model, settings }: { model: SceneModel; settings: Viewpo
 
     return () => {
       observer.disconnect()
+      for (const subscription of subscriptions) subscription.unsubscribe()
       ctxRef.current?.marker?.setEnabled(false)
       generic.delete()
       ctxRef.current = null
@@ -422,8 +629,9 @@ export function Scene({ model, settings }: { model: SceneModel; settings: Viewpo
           surface.format === 'stl' ? vtkSTLReader.newInstance() : vtkPLYReader.newInstance()
         reader.parseAsArrayBuffer(buffer)
 
+        const data = reader.getOutputData(0)
         const mapper = vtkMapper.newInstance()
-        mapper.setInputData(reader.getOutputData(0))
+        mapper.setInputData(data)
 
         const actor = vtkActor.newInstance()
         actor.setMapper(mapper)
@@ -433,8 +641,23 @@ export function Scene({ model, settings }: { model: SceneModel; settings: Viewpo
         actor.getProperty().setDiffuse(0.8)
         actor.getProperty().setSpecular(0.1)
 
+        const labels = await loadVertexLabels(surface, data.getPoints().getNumberOfPoints())
+        if (cancelled) return
+
+        // Resolving a picked cell to its points goes through the mesh's cell
+        // array, which parsing does not build — it is undefined until this is
+        // called. Rendering never needs it, so nothing else would notice.
+        if (labels) data.buildCells()
+
         ctx.renderer.addActor(actor)
-        ctx.surfaces.set(surface.id, { actor, mapper, reader } as unknown as SurfaceEntry)
+        ctx.surfaces.set(surface.id, {
+          actor,
+          mapper,
+          reader,
+          labels,
+          colours: null,
+          colourArray: null,
+        } as unknown as SurfaceEntry)
 
         // The first thing on screen sets the camera; adding more later must not
         // yank the view the user has framed.
@@ -477,6 +700,63 @@ export function Scene({ model, settings }: { model: SceneModel; settings: Viewpo
     }
     ctx.renderWindow.render()
   }, [model, settings.showVolume, revision])
+
+  // ── selection: recolour the picked structure, dim the rest ───────────────
+  useEffect(() => {
+    const ctx = ctxRef.current
+    if (!ctx) return
+
+    for (const [id, entry] of ctx.surfaces) {
+      const picked = selection?.surfaceId === id ? selection : null
+      const surface = model.surfaces.find((s) => s.id === id)
+      const values = entry.labels?.values
+
+      if (!picked || !values || !surface) {
+        entry.mapper.setScalarVisibility(false)
+        entry.mapper.modified()
+        continue
+      }
+
+      if (!entry.colours || !entry.colourArray) {
+        entry.colours = new Uint8Array(values.length * 3)
+        entry.colourArray = vtkDataArray.newInstance({
+          name: 'selection colours',
+          values: entry.colours,
+          numberOfComponents: 3,
+        })
+        // Replaces the reader's scalars rather than joining them: the mapper
+        // looks up point-data scalars by name, and a PLY with its own scalars
+        // would otherwise keep winning.
+        ;(entry.mapper as unknown as { getInputData(): CellTopology & {
+          getPointData(): { setScalars(array: unknown): void }
+        } }).getInputData().getPointData().setScalars(entry.colourArray)
+      }
+
+      // The result's own colour, normalised to full brightness, so the picked
+      // structure still reads as belonging to that result.
+      const peak = Math.max(...surface.color, 0.001)
+      const accent = surface.color.map((c) => Math.round(255 * Math.min(1, (c / peak) * 0.95 + 0.05)))
+      const colours = entry.colours
+
+      for (let i = 0; i < values.length; i += 1) {
+        const chosen = values[i] === picked.label
+        colours[i * 3] = chosen ? accent[0] : DIMMED[0]
+        colours[i * 3 + 1] = chosen ? accent[1] : DIMMED[1]
+        colours[i * 3 + 2] = chosen ? accent[2] : DIMMED[2]
+      }
+
+      // The mapper caches its colour build on the array's modification time,
+      // and writing into the typed array does not move it — without this the
+      // colours on screen stay those of the previous pick.
+      entry.colourArray.modified()
+      entry.mapper.setScalarVisibility(true)
+      entry.mapper.setScalarModeToUsePointData()
+      entry.mapper.setColorModeToDirectScalars()
+      entry.mapper.modified()
+    }
+
+    ctx.renderWindow.render()
+  }, [selection, model, revision])
 
   // ── background ───────────────────────────────────────────────────────────
   useEffect(() => {

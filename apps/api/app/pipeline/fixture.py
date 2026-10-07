@@ -32,7 +32,8 @@ from .interfaces import (
     Op,
     OpNotSupported,
 )
-from .isosurface import SurfaceError, extract
+from . import totalseg
+from .isosurface import SurfaceError, extract, extract_labelled
 from .meshgen import build_dental_arch, to_ply
 from .ply import write_ply
 
@@ -198,6 +199,80 @@ def _reconstruct(envelope: dict, params: dict, context: dict) -> None:
 
 
 def _segment(envelope: dict, params: dict, context: dict) -> None:
+    """Volumetric segmentation for a DICOM source, synthetic FDI otherwise.
+
+    A CT has structures to find and TotalSegmentator finds them. An RGB capture
+    has no volume, so the dental path stays synthetic until a mesh segmenter
+    exists (Notes/05, Notes/11).
+    """
+    capture = context.get("capture") or {}
+    sources = context.get("sources")
+    source_id = capture.get("source_id")
+    record = sources.get(str(source_id)) if (sources is not None and source_id) else None
+
+    if record is not None and record.kind == "dicom":
+        _segment_volume(envelope, params, context, sources, record)
+        return
+
+    _segment_synthetic(envelope, params)
+
+
+def _segment_volume(envelope: dict, params: dict, context: dict, sources, record) -> None:
+    storage: LocalStorage = context["storage"]
+    classes = params.get("classes") or None
+
+    seg = totalseg.run(
+        sources.directory(record.source_id),
+        classes=classes,
+        fast=bool(params.get("fast", True)),
+        task=str(params.get("task", "total")),
+    )
+    blob, header = totalseg.serialise(seg)
+
+    header_ref = storage.put(
+        f"artifacts/{envelope['result_id']}/labels.json",
+        json.dumps(header, indent=2).encode("utf-8"),
+    )
+    bin_ref = storage.put(f"artifacts/{envelope['result_id']}/labels.bin", blob)
+
+    envelope["artifacts"].append(
+        {
+            # "mask", not "labels": the per-vertex label array below is the
+            # "labels" artifact, and one kind for both made them ambiguous.
+            "kind": "mask",
+            "format": "bin",
+            "ref": bin_ref,
+            "bytes": len(blob),
+            "header_ref": header_ref,
+        }
+    )
+
+    entries = []
+    for label_id in header["labels"]:
+        name = seg.legend.get(int(label_id), f"label {label_id}")
+        entry: dict[str, object] = {"id": int(label_id), "name": name}
+        volume = seg.volumes_mm3.get(name)
+        if volume is not None:
+            entry["volume"] = float(volume)
+        entries.append(entry)
+
+    envelope["segmentation"] = {
+        "kind": "volumetric",
+        "classes": entries,
+        "mask_ref": bin_ref,
+        "mask_header_ref": header_ref,
+        "flags": [],
+    }
+
+    # The mask keeps its own geometry. If our assembled volume was strided down
+    # they will not match, and per-label extraction has to run on the mask.
+    envelope["geometry"] = {
+        "mask_dims": list(seg.dims),
+        "mask_spacing": [float(v) for v in seg.spacing],
+    }
+
+
+def _segment_synthetic(envelope: dict, params: dict) -> None:
     instances = []
     abstentions = 0
     for index, fdi in enumerate((*_UPPER_RIGHT, *_UPPER_LEFT)):
@@ -243,11 +318,104 @@ def _isolate_volume(envelope: dict, params: dict, context: dict) -> None:
 
 
 def _iso_surface(envelope: dict, params: dict, context: dict) -> None:
-    """Marching cubes over a stored volume at a density threshold.
+    """Surface the data.
 
-    Needs a source rather than a capture: the volume lives in the source store,
-    already decoded, so the job points at it by id.
+    Two routes, chosen by what the job already has: if an earlier `segment`
+    stage produced a mask in this same envelope, the surface follows the mask's
+    label boundaries and every vertex carries a label. Otherwise it is a plain
+    density threshold over the volume, with no labels.
+
+    The first route is why stages share one envelope — chaining `segment` and
+    `iso_surface` in one job is what turns a mask into clickable geometry.
     """
+    segmentation = envelope.get("segmentation") or {}
+    if segmentation.get("kind") == "volumetric" and segmentation.get("mask_ref"):
+        _iso_surface_labelled(envelope, params, context, segmentation)
+        return
+
+    _iso_surface_threshold(envelope, params, context)
+
+
+def _iso_surface_labelled(
+    envelope: dict, params: dict, context: dict, segmentation: dict
+) -> None:
+    storage: LocalStorage = context["storage"]
+
+    header = json.loads(storage.get(segmentation["mask_header_ref"]).decode("utf-8"))
+    legend = {int(k): str(v) for k, v in (header.get("legend") or {}).items()}
+
+    keep: set[int] | None = None
+    requested = params.get("label", "all")
+    if requested not in (None, "", "all"):
+        text = str(requested)
+        if text.lstrip("-").isdigit():
+            keep = {int(text)}
+        else:
+            keep = {label_id for label_id, name in legend.items() if name == text}
+        if not keep:
+            raise SurfaceError(
+                f"no label {text!r} in this mask. Available: "
+                + ", ".join(sorted(legend.values()))[:400]
+            )
+
+    surface = extract_labelled(
+        storage.get(segmentation["mask_ref"]),
+        header,
+        keep=keep,
+        stride=int(params.get("stride", 1)),
+    )
+
+    mesh_ref = storage.put(
+        f"artifacts/{envelope['result_id']}/surface.ply",
+        write_ply(surface.vertices, surface.faces),
+    )
+    labels_ref = storage.put(
+        f"artifacts/{envelope['result_id']}/vertex-labels.bin",
+        surface.vertex_labels.tobytes(order="C"),
+    )
+    labels_header_ref = storage.put(
+        f"artifacts/{envelope['result_id']}/vertex-labels.json",
+        json.dumps(
+            {
+                "kind": "vertex",
+                "count": int(surface.vertex_labels.size),
+                "legend": {str(k): v for k, v in surface.legend.items()},
+                "counts": {str(k): v for k, v in surface.counts.items()},
+            },
+            indent=2,
+        ).encode("utf-8"),
+    )
+
+    envelope["artifacts"].append(
+        {
+            "kind": "mesh",
+            "format": "ply",
+            "ref": mesh_ref,
+            "units": "mm",
+            "vertices": int(len(surface.vertices)),
+            "triangles": int(len(surface.faces)),
+        }
+    )
+    # Sidecar, not a PLY face property: the vtk.js PLY reader ignores face
+    # properties and would drop these without an error.
+    envelope["artifacts"].append(
+        {
+            "kind": "labels",
+            "format": "bin",
+            "ref": labels_ref,
+            "vertices": int(surface.vertex_labels.size),
+            "header_ref": labels_header_ref,
+        }
+    )
+    envelope["geometry"] = {
+        "stride": surface.stride,
+        "labels": sorted(surface.legend),
+        "bounds": _bounds(surface.vertices),
+    }
+
+
+def _iso_surface_threshold(envelope: dict, params: dict, context: dict) -> None:
+    """Density threshold over the volume. No labels — there is nothing to label with."""
     storage: LocalStorage = context["storage"]
     sources: SourceStore | None = context.get("sources")
     source_id = (context.get("capture") or {}).get("source_id")

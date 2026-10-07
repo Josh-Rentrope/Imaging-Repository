@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
 
 import {
+  ALL_LABELS,
   buildStages,
   DEFAULT_THRESHOLD,
   OPS_BY_KIND,
   PipelineSection,
+  SURFACE_AFTER_MASK,
   type PipelineParams,
 } from '../editor/PipelineSection'
 import { ResultsSection, type ResultView } from '../editor/ResultsSection'
@@ -51,6 +53,7 @@ export default function EditorRoute() {
   const [params, setParams] = useState<PipelineParams>({
     threshold: DEFAULT_THRESHOLD,
     stride: 1,
+    label: ALL_LABELS,
   })
   const [hasDepth, setHasDepth] = useState(false)
   const [hasFiducial, setHasFiducial] = useState(false)
@@ -93,7 +96,16 @@ export default function EditorRoute() {
   useEffect(() => {
     setError(null)
     setSelectedOps(activeSource ? OPS_BY_KIND[activeSource.kind] : [])
+    // A label picked for one scan generally does not exist in another, and the
+    // failure would only surface once the job had run.
+    setParams((current) => ({ ...current, label: ALL_LABELS }))
   }, [sourceId, activeSource?.kind])
+
+  // Class names from any segmentation already run on this source, so the label
+  // field can offer them instead of relying on the user remembering them.
+  const knownLabels = results.flatMap((result) =>
+    (result.job.result?.segmentation?.classes ?? []).map((entry) => entry.name),
+  )
 
   const updateResults = (id: string, update: (list: ResultView[]) => ResultView[]) =>
     setResultsBySource((current) => ({ ...current, [id]: update(current[id] ?? []) }))
@@ -120,7 +132,7 @@ export default function EditorRoute() {
     setBusy(true)
     setError(null)
     try {
-      const stages = buildStages(selectedOps, params)
+      const stages = buildStages(ops, selectedOps, params)
       let job = await api.submitJob({
         stages,
         capture: buildCapture(activeSource, hasDepth, hasFiducial),
@@ -177,13 +189,28 @@ export default function EditorRoute() {
           ops={ops}
           selected={selectedOps}
           onToggle={(op) =>
-            setSelectedOps((current) =>
-              current.includes(op) ? current.filter((o) => o !== op) : [...current, op],
-            )
+            setSelectedOps((current) => {
+              if (current.includes(op)) return current.filter((o) => o !== op)
+
+              const next = [...current, op]
+              // A segmentation on its own produces a mask and nothing to look
+              // at. The surface is what makes it visible and clickable, so
+              // ticking one brings the other — unless the user has already
+              // asked for a surface, or this kind has none to offer.
+              if (
+                op === Op.SEGMENT &&
+                !next.includes(SURFACE_AFTER_MASK) &&
+                ops.includes(SURFACE_AFTER_MASK)
+              ) {
+                next.push(SURFACE_AFTER_MASK)
+              }
+              return next
+            })
           }
           params={params}
           onParamsChange={setParams}
           valueRange={valueRange}
+          knownLabels={knownLabels}
           onRun={run}
           canRun={Boolean(activeSource)}
           busy={busy}

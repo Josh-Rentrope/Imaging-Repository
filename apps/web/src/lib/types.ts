@@ -49,13 +49,25 @@ export interface HealthBackend {
 }
 
 export interface ResultArtifact {
-  kind: 'mesh' | 'volume' | 'splat' | 'radiograph_overlay' | 'thumbnail' | 'report'
+  kind:
+    | 'mesh'
+    | 'volume'
+    | 'splat'
+    | 'radiograph_overlay'
+    | 'thumbnail'
+    | 'report'
+    /** Per-vertex labels for a mesh. A sidecar, never a property on the mesh. */
+    | 'labels'
+    /** A multi-label voxel mask. */
+    | 'mask'
   format: string
   ref: string
   units?: 'mm' | 'arbitrary'
   bytes?: number
   vertices?: number
   triangles?: number
+  /** Companion header for a binary artifact: a label legend, mask geometry, etc. */
+  header_ref?: string
 }
 
 export interface SegmentationInstance {
@@ -72,6 +84,19 @@ export interface Segmentation {
   unassigned_region_pct: number
   instances: SegmentationInstance[]
   flags: string[]
+  /** `volumetric` for a multi-label mask over a CT. Absent on the FDI path. */
+  kind?: 'volumetric' | 'fdi'
+  classes?: { id: number; name: string; volume?: number }[]
+  mask_ref?: string
+  mask_header_ref?: string
+}
+
+/** Companion written alongside a per-vertex label blob. */
+export interface VertexLabelHeader {
+  kind: 'vertex'
+  count: number
+  legend: Record<string, string>
+  counts: Record<string, number>
 }
 
 export interface Measurement {
@@ -110,6 +135,8 @@ export interface ResultEnvelope {
     stride?: number
     /** [xmin, xmax, ymin, ymax, zmin, zmax] of an extracted surface, world space. */
     bounds?: number[]
+    /** Labels present on a labelled surface, in ascending order. */
+    labels?: number[]
   } | null
   artifacts: ResultArtifact[]
   segmentation?: Segmentation | null

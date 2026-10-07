@@ -24,6 +24,10 @@ function summary(job: Job): string | null {
   const mesh = result.artifacts.find((a) => a.kind === 'mesh')
   if (mesh?.triangles) bits.push(`${mesh.triangles.toLocaleString()} tris`)
   if (result.geometry?.threshold != null) bits.push(`${Math.round(result.geometry.threshold)} HU`)
+  // The tell for a surface that can be clicked: one extracted from a mask
+  // carries labels, one from a density threshold carries none.
+  const labels = result.geometry?.labels
+  if (labels && labels.length > 0) bits.push(`${labels.length} labels`)
   if (result.measurements.length > 0) bits.push(`${result.measurements.length} measures`)
   return bits.length > 0 ? bits.join(' · ') : null
 }

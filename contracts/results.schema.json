@@ -164,7 +164,9 @@
               "splat",
               "radiograph_overlay",
               "thumbnail",
-              "report"
+              "report",
+              "labels",
+              "mask"
             ]
           },
           "format": {
@@ -178,7 +180,8 @@
               "nii",
               "png",
               "json",
-              "pdf"
+              "pdf",
+              "bin"
             ]
           },
           "ref": {
@@ -203,6 +206,10 @@
           "triangles": {
             "type": "integer",
             "minimum": 0
+          },
+          "header_ref": {
+            "type": "string",
+            "description": "Companion header for a binary artifact -- a label legend, a mask geometry, and so on."
           }
         }
       }
@@ -283,6 +290,46 @@
               "partial_edentulism"
             ]
           }
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "volumetric",
+            "fdi"
+          ],
+          "description": "volumetric = a multi-label mask over a volume (CT). fdi = per-tooth instances on a surface."
+        },
+        "classes": {
+          "type": "array",
+          "description": "Volumetric path: one entry per label in the mask.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "name"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "integer"
+              },
+              "name": {
+                "type": "string"
+              },
+              "volume": {
+                "type": "number",
+                "description": "Volume in mm^3, when the segmenter reports it."
+              }
+            }
+          }
+        },
+        "mask_ref": {
+          "type": "string",
+          "description": "int32 multi-label mask blob, (nz, ny, nx) C-order."
+        },
+        "mask_header_ref": {
+          "type": "string",
+          "description": "JSON header for the mask: dims, spacing, origin, legend."
         }
       }
     },
