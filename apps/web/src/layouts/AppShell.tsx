@@ -1,31 +1,21 @@
-import { type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 
 import { BackendStatus } from '../components/BackendStatus'
+import { WorkspaceManager } from '../editor/WorkspaceManager'
 import { useEditor } from '../state/editor'
 
 /**
  * Application frame.
  *
- * The workspace switcher scopes everything below it; the working-set switcher
- * picks the collection of sources the editor is operating on. Both are native
- * selects — swap for a menu component when the styling pass happens.
+ * The workspace switcher scopes everything below it and the working-set
+ * switcher picks the collection of sources the editor operates on. Renaming and
+ * deletion live in the manager rather than beside the switchers, so switching
+ * stays a two-click operation with nothing destructive adjacent to it.
  */
 export function AppShell({ children }: { children: ReactNode }) {
-  const {
-    workspaces,
-    activeWorkspaceId,
-    selectWorkspace,
-    addWorkspace,
-    activeWorkspace,
-    activeSet,
-    selectSet,
-    addSet,
-  } = useEditor()
-
-  const nameFor = (fallback: string) => {
-    const entered = window.prompt('Name', fallback)
-    return entered?.trim() || null
-  }
+  const { workspaces, activeWorkspaceId, selectWorkspace, activeWorkspace, activeSet, selectSet } =
+    useEditor()
+  const [managerOpen, setManagerOpen] = useState(false)
 
   return (
     <div className="app">
@@ -44,37 +34,16 @@ export function AppShell({ children }: { children: ReactNode }) {
               </option>
             ))}
           </select>
-          <button
-            title="New workspace"
-            onClick={() => {
-              const name = nameFor(`Workspace ${workspaces.length + 1}`)
-              if (name) addWorkspace(name)
-            }}
-          >
-            +
-          </button>
-        </div>
-
-        <div className="header-group">
-          <select
-            value={activeSet.id}
-            onChange={(event) => selectSet(event.target.value)}
-            title="Working set"
-          >
+          <span className="muted">/</span>
+          <select value={activeSet.id} onChange={(event) => selectSet(event.target.value)} title="Working set">
             {activeWorkspace.sets.map((set) => (
               <option key={set.id} value={set.id}>
                 {set.name}
               </option>
             ))}
           </select>
-          <button
-            title="New working set"
-            onClick={() => {
-              const name = nameFor(`Working set ${activeWorkspace.sets.length + 1}`)
-              if (name) addSet(name)
-            }}
-          >
-            +
+          <button onClick={() => setManagerOpen(true)} title="Manage workspaces, sets and sources">
+            manage
           </button>
         </div>
 
@@ -83,6 +52,8 @@ export function AppShell({ children }: { children: ReactNode }) {
       </header>
 
       {children}
+
+      <WorkspaceManager open={managerOpen} onClose={() => setManagerOpen(false)} />
     </div>
   )
 }

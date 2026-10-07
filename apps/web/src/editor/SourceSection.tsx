@@ -1,20 +1,88 @@
-import { useEditor, type Source } from '../state/editor'
+import { useEffect, useRef, useState } from 'react'
+
+import type { SourceSummary } from '../lib/types'
+import { useEditor } from '../state/editor'
 import { DropZone } from './DropZone'
 
-function SourceRow({ source, selected, onSelect }: { source: Source; selected: boolean; onSelect: () => void }) {
+function meta(source: SourceSummary): string {
+  if (source.kind === 'dicom') return `${source.instance_count} slice${source.instance_count === 1 ? '' : 's'}`
+  return `${source.instance_count} image${source.instance_count === 1 ? '' : 's'}`
+}
+
+function SourceRow({ source, selected }: { source: SourceSummary; selected: boolean }) {
+  const { selectSource, renameSource } = useEditor()
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(source.name)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (editing) inputRef.current?.select()
+  }, [editing])
+
+  const commit = () => {
+    setEditing(false)
+    const cleaned = draft.trim()
+    if (cleaned && cleaned !== source.name) void renameSource(source.source_id, cleaned)
+    else setDraft(source.name)
+  }
+
   return (
     <li>
-      <button
+      <div
         className="source-item"
         aria-selected={selected}
-        onClick={onSelect}
-        title={source.error ?? source.name}
+        onClick={() => selectSource(source.source_id)}
+        onDoubleClick={() => {
+          setDraft(source.name)
+          setEditing(true)
+        }}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') selectSource(source.source_id)
+        }}
+        title={source.render_reason ?? source.original_name ?? source.name}
       >
-        <span className="source-item-name">{source.name}</span>
-        <span className="source-item-meta">
-          {source.status === 'error' ? <span className="error-text">!</span> : source.meta}
-        </span>
-      </button>
+        {editing ? (
+          <input
+            ref={inputRef}
+            className="source-item-name"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onBlur={commit}
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') commit()
+              if (event.key === 'Escape') {
+                setDraft(source.name)
+                setEditing(false)
+              }
+            }}
+          />
+        ) : (
+          <span className="source-item-name">{source.name}</span>
+        )}
+
+        {!editing && (
+          <span className="source-item-meta">
+            {!source.renderable && <span title={source.render_reason ?? undefined}>·</span>} {meta(source)}
+          </span>
+        )}
+
+        {selected && !editing && (
+          <button
+            className="source-item-action"
+            title="Rename"
+            onClick={(event) => {
+              event.stopPropagation()
+              setDraft(source.name)
+              setEditing(true)
+            }}
+          >
+            ✎
+          </button>
+        )}
+      </div>
     </li>
   )
 }
@@ -26,39 +94,36 @@ export function SourceSection({
   onFiles: (files: File[], kind: 'dicom' | 'images') => void
   uploading: boolean
 }) {
-  const { activeSources, activeSourceId, selectSource, clearSources } = useEditor()
+  const { sources, sourcesLoading, sourcesError, activeSourceId } = useEditor()
 
   return (
     <div className="section">
       <h2 className="section-title">
         Sources
-        {activeSources.length > 0 && (
-          <span className="section-count">
-            {activeSources.length}
-            <button
-              onClick={clearSources}
-              title="Remove all sources from this working set"
-              style={{ marginLeft: 8, padding: '0 6px' }}
-            >
-              clear
-            </button>
-          </span>
-        )}
+        {sources.length > 0 && <span className="section-count">{sources.length}</span>}
       </h2>
 
       <DropZone onFiles={onFiles} disabled={uploading} />
 
-      {activeSources.length > 0 && (
+      {uploading && <p className="muted" style={{ margin: '8px 0 0' }}>Uploading…</p>}
+      {sourcesError && <p className="error-text" style={{ margin: '8px 0 0' }}>{sourcesError}</p>}
+
+      {sourcesLoading ? (
+        <p className="muted" style={{ margin: '8px 0 0' }}>Loading…</p>
+      ) : sources.length > 0 ? (
         <ul className="source-list" style={{ marginTop: 8 }}>
-          {activeSources.map((source) => (
-            <SourceRow
-              key={source.id}
-              source={source}
-              selected={source.id === activeSourceId}
-              onSelect={() => selectSource(source.id)}
-            />
+          {sources.map((source) => (
+            <SourceRow key={source.source_id} source={source} selected={source.source_id === activeSourceId} />
           ))}
         </ul>
+      ) : (
+        <p className="muted" style={{ margin: '8px 0 0' }}>Nothing in this working set.</p>
+      )}
+
+      {sources.length > 0 && (
+        <p className="muted" style={{ margin: '8px 0 0', fontSize: 11 }}>
+          Double-click a name to rename.
+        </p>
       )}
     </div>
   )

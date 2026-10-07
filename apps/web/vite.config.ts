@@ -19,17 +19,12 @@ export default defineConfig({
     },
   },
   build: {
-    // three.js + Cornerstone are both large; splitting them keeps the initial
-    // route fast and stops a viewer change from invalidating the app bundle.
-    // Written as a function because Rollup's object form is awkward to type
-    // against the package ids these two pull in transitively.
+    // vtk.js is ~1.5 MB and is only needed once there is something to render, so
+    // it gets its own chunk and is loaded on demand by the viewport.
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (id.includes('node_modules')) {
-            if (id.includes('/three/') || id.includes('@react-three')) return 'three'
-            if (id.includes('@cornerstonejs')) return 'cornerstone'
-          }
+          if (id.includes('node_modules') && id.includes('@kitware/vtk.js')) return 'vtk'
           return undefined
         },
       },

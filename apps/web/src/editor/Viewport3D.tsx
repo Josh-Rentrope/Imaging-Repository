@@ -1,6 +1,12 @@
-import type { Job, ResultEnvelope } from '../lib/types'
-import type { Source } from '../state/editor'
-import { Scene } from './Scene'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+
+import { api } from '../lib/api'
+import type { Job, ResultEnvelope, SourceSummary, VolumePayload } from '../lib/types'
+import type { SceneInput } from './Scene'
+
+// vtk.js is heavy and is only needed once something is actually being rendered,
+// so the whole renderer is behind a dynamic import.
+const Scene = lazy(() => import('./Scene').then((module) => ({ default: module.Scene })))
 
 /**
  * Scale indicator. When `verified` is false the geometry has no metric anchor,
@@ -21,11 +27,11 @@ function ScaleTag({ scale }: { scale: ResultEnvelope['scale'] }) {
   )
 }
 
-function placeholderFor(source: Source | null): string {
+function placeholderFor(source: SourceSummary | null, loadingVolume: boolean): string {
   if (!source) return 'Drop a source to begin'
-  if (source.status === 'busy') return 'Processing…'
-  if (source.kind === 'dicom') return 'Volume rendering not implemented'
-  return 'No geometry yet — run the pipeline'
+  if (loadingVolume) return 'Loading volume…'
+  if (!source.renderable) return source.render_reason ?? 'Nothing to display'
+  return 'Select the source'
 }
 
 export function Viewport3D({
@@ -34,12 +40,49 @@ export function Viewport3D({
   job,
   busy,
 }: {
-  source: Source | null
+  source: SourceSummary | null
   result: ResultEnvelope | null
   job: Job | null
   busy: boolean
 }) {
+  const [volume, setVolume] = useState<VolumePayload | null>(null)
+  const [loadingVolume, setLoadingVolume] = useState(false)
+
+  const renderableDicom = source?.kind === 'dicom' && source.renderable
+
+  useEffect(() => {
+    if (!source || !renderableDicom) {
+      setVolume(null)
+      return
+    }
+
+    let cancelled = false
+    setLoadingVolume(true)
+    api
+      .getVolume(source.source_id)
+      .then((payload) => {
+        if (!cancelled) setVolume(payload)
+      })
+      .catch(() => {
+        if (!cancelled) setVolume(null)
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingVolume(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [source, renderableDicom])
+
+  // A pipeline result takes precedence over the source's own volume, so running
+  // segmentation on a series shows the derived geometry rather than the raw scan.
   const mesh = result?.artifacts.find((a) => a.kind === 'mesh') ?? null
+  const input = useMemo<SceneInput | null>(() => {
+    if (mesh) return { kind: 'surface', meshRef: mesh.ref, format: mesh.format }
+    if (volume) return { kind: 'volume', headerRef: volume.header_ref, binRef: volume.bin_ref }
+    return null
+  }, [mesh?.ref, mesh?.format, volume])
 
   return (
     <section className="viewport">
@@ -51,12 +94,12 @@ export function Viewport3D({
         </span>
       </div>
 
-      {mesh ? (
-        <Scene meshRef={mesh.ref} units={mesh.units ?? 'arbitrary'} />
+      {input ? (
+        <Suspense fallback={<div className="empty-state">Loading renderer…</div>}>
+          <Scene input={input} />
+        </Suspense>
       ) : (
-        <div className="empty-state">
-          <span>{placeholderFor(source)}</span>
-        </div>
+        <div className="empty-state">{placeholderFor(source, loadingVolume)}</div>
       )}
 
       {result && (

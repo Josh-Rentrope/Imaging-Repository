@@ -204,6 +204,81 @@ button, select, input {
   white-space: nowrap;
 }
 
+.source-item input.source-item-name {
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 1px 4px;
+  min-width: 0;
+}
+
+.source-item-action {
+  padding: 0 5px;
+  background: none;
+  border-color: transparent;
+}
+
+.row-actions {
+  display: flex;
+  gap: 2px;
+}
+
+.row-actions button {
+  padding: 1px 6px;
+  background: none;
+  border-color: transparent;
+}
+
+/* ── Modal ───────────────────────────────────────────────────────────────── */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: grid;
+  place-items: center;
+  z-index: 50;
+}
+
+.modal {
+  width: min(920px, 92vw);
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-header h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.modal-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0;
+  overflow-y: auto;
+}
+
+.modal-column {
+  padding: 12px 14px;
+  border-right: 1px solid var(--border);
+  min-height: 0;
+}
+
+.modal-column:last-child { border-right: none; }
+
 .source-item-meta {
   color: var(--fg-muted);
   font-size: 11px;

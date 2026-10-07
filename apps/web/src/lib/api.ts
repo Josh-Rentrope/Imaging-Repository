@@ -1,18 +1,18 @@
 /**
  * API client.
  *
- * Everything goes through `/api`, which Vite proxies to the backend in dev (see
- * vite.config.ts). Same-origin in both dev and prod means no CORS preflight and
- * no environment-specific URL juggling in components.
+ * Everything goes through `/api`, which Vite proxies to the backend in dev, so
+ * the browser is same-origin and there is no environment-specific URL handling
+ * in components.
  */
 
 import type {
   CapabilitiesResponse,
-  DicomSeries,
-  DicomSeriesSummary,
   HealthBackend,
   Job,
   JobCreate,
+  SourceSummary,
+  VolumePayload,
 } from './types'
 
 const BASE = '/api'
@@ -34,7 +34,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     response = await fetch(`${BASE}${path}`, init)
   } catch (cause) {
     throw new ApiError(
-      `Cannot reach the API at ${BASE}. Is it running? Start it with: cd apps/api && uv run uvicorn app.main:app --reload --port 8787`,
+      `Cannot reach the API at ${BASE}. Start it with: cd apps/api && uv run uvicorn app.main:app --reload --port 8787`,
       0,
       cause,
     )
@@ -58,10 +58,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T
 }
 
-/** Turn an opaque storage ref into something an <img>/loader can fetch. */
+/** Turn an opaque storage ref into something fetchable. */
 export function artifactUrl(ref: string): string {
   const key = ref.includes('://') ? ref.split('://', 2)[1] : ref
   return `${BASE}/artifacts/${key}`
+}
+
+function uploadForm(files: File[], workspaceId: string, setId: string): FormData {
+  const form = new FormData()
+  for (const file of files) form.append('files', file, file.name)
+  form.append('workspace_id', workspaceId)
+  form.append('set_id', setId)
+  return form
 }
 
 export const api = {
@@ -77,20 +85,30 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  listSeries: () => request<DicomSeriesSummary[]>('/dicom/series'),
-  getSeries: (id: string) => request<DicomSeries>(`/dicom/series/${encodeURIComponent(id)}`),
+  listSources: (workspaceId: string, setId: string) =>
+    request<SourceSummary[]>(
+      `/sources?workspace_id=${encodeURIComponent(workspaceId)}&set_id=${encodeURIComponent(setId)}`,
+    ),
 
-  uploadDicom: async (files: File[]): Promise<DicomSeries[]> => {
+  uploadDicom: (files: File[], workspaceId: string, setId: string) =>
+    request<SourceSummary>('/sources/dicom', {
+      method: 'POST',
+      body: uploadForm(files, workspaceId, setId),
+    }),
+
+  uploadImages: (files: File[], workspaceId: string, setId: string) =>
+    request<SourceSummary>('/sources/images', {
+      method: 'POST',
+      body: uploadForm(files, workspaceId, setId),
+    }),
+
+  renameSource: (id: string, name: string) => {
     const form = new FormData()
-    for (const file of files) form.append('files', file, file.name)
-    return request<DicomSeries[]>('/dicom/series', { method: 'POST', body: form })
+    form.append('name', name)
+    return request<SourceSummary>(`/sources/${id}`, { method: 'PATCH', body: form })
   },
-}
 
-export async function fetchArtifactText(ref: string): Promise<string> {
-  const response = await fetch(artifactUrl(ref))
-  if (!response.ok) {
-    throw new ApiError(`Failed to fetch artefact (${response.status})`, response.status)
-  }
-  return response.text()
+  deleteSource: (id: string) => request<void>(`/sources/${id}`, { method: 'DELETE' }),
+
+  getVolume: (id: string) => request<VolumePayload>(`/sources/${id}/volume`),
 }

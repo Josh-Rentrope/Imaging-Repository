@@ -5,34 +5,31 @@ import { ResultSection } from '../editor/ResultSection'
 import { SourceSection } from '../editor/SourceSection'
 import { Viewport3D } from '../editor/Viewport3D'
 import { api } from '../lib/api'
-import type { DicomSeries, Job, Stage } from '../lib/types'
-import { useEditor, type Source } from '../state/editor'
+import type { Job, SourceSummary, Stage } from '../lib/types'
+import { useEditor } from '../state/editor'
 
 /** Capture descriptor for a source. Photos carry no depth unless told otherwise. */
-function buildCapture(source: Source, hasDepth: boolean, hasFiducial: boolean) {
+function buildCapture(source: SourceSummary, hasDepth: boolean, hasFiducial: boolean) {
   const capture_id = crypto.randomUUID()
 
   if (source.kind === 'dicom') {
-    return { capture_id, modality: 'radiograph' }
+    return { capture_id, modality: 'radiograph', source_id: source.source_id }
   }
 
   return {
     capture_id,
     modality: hasDepth ? 'rgbd' : 'rgb',
-    ...(hasDepth
-      ? { depth: [{ frame_id: 0, depth_ref: 'depth/0', aligned_to_rgb: true }] }
-      : {}),
+    source_id: source.source_id,
+    ...(hasDepth ? { depth: [{ frame_id: 0, depth_ref: 'depth/0', aligned_to_rgb: true }] } : {}),
     quality: {
       coverage_pct: 88,
-      ...(hasFiducial
-        ? { scale_reference: { kind: 'aruco', size_mm: 20, detected_frames: [0, 1] } }
-        : {}),
+      ...(hasFiducial ? { scale_reference: { kind: 'aruco', size_mm: 20, detected_frames: [0, 1] } } : {}),
     },
   }
 }
 
 export default function EditorRoute() {
-  const { activeSource, addSources } = useEditor()
+  const { activeSource, activeWorkspace, activeSet, refreshSources, selectSource } = useEditor()
 
   const [selectedOps, setSelectedOps] = useState<string[]>([])
   const [hasDepth, setHasDepth] = useState(false)
@@ -50,38 +47,18 @@ export default function EditorRoute() {
     setJob(null)
     setError(null)
     setSelectedOps(activeSource ? OPS_BY_KIND[activeSource.kind] : [])
-  }, [activeSource?.id, activeSource?.kind])
+  }, [activeSource?.source_id, activeSource?.kind])
 
   async function handleFiles(files: File[], kind: 'dicom' | 'images') {
     setUploading(true)
     setError(null)
     try {
-      if (kind === 'dicom') {
-        const series = await api.uploadDicom(files)
-        addSources(
-          series.map((s: DicomSeries) => ({
-            id: crypto.randomUUID(),
-            kind: 'dicom' as const,
-            name: s.description || `Series ${s.series_id.slice(0, 8)}`,
-            meta: `${s.instance_count} slices`,
-            status: s.headerless ? ('error' as const) : ('ready' as const),
-            error: s.headerless ? 'No parseable DICOM header' : undefined,
-            payload: s,
-          })),
-        )
-      } else {
-        const root = files[0]?.webkitRelativePath?.split('/')[0]
-        addSources([
-          {
-            id: crypto.randomUUID(),
-            kind: 'images',
-            name: root || `${files.length} images`,
-            meta: `${files.length} images`,
-            status: 'ready',
-            payload: files,
-          },
-        ])
-      }
+      const created =
+        kind === 'dicom'
+          ? await api.uploadDicom(files, activeWorkspace.id, activeSet.id)
+          : await api.uploadImages(files, activeWorkspace.id, activeSet.id)
+      await refreshSources()
+      selectSource(created.source_id)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -114,12 +91,7 @@ export default function EditorRoute() {
 
   return (
     <div className="editor">
-      <Viewport3D
-        source={activeSource}
-        result={job?.result ?? null}
-        job={job}
-        busy={busy}
-      />
+      <Viewport3D source={activeSource} result={job?.result ?? null} job={job} busy={busy} />
 
       <aside className="sidebar">
         <SourceSection onFiles={handleFiles} uploading={uploading} />
@@ -128,11 +100,7 @@ export default function EditorRoute() {
           <div className="section">
             <h2 className="section-title">Capture</h2>
             <label className="field">
-              <input
-                type="checkbox"
-                checked={hasDepth}
-                onChange={(e) => setHasDepth(e.target.checked)}
-              />
+              <input type="checkbox" checked={hasDepth} onChange={(e) => setHasDepth(e.target.checked)} />
               <span className="field-label">depth available</span>
             </label>
             <label className="field">

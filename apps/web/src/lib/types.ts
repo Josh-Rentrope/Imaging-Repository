@@ -139,31 +139,38 @@ export interface JobCreate {
   allow_diagnostic?: boolean
 }
 
-export interface DicomInstance {
-  sop_instance_uid: string
-  file_name: string
-  ref: string
-  bytes: number
-  rows: number | null
-  columns: number | null
-}
+export type SourceKind = 'dicom' | 'images'
 
-export interface DicomSeries {
-  series_id: string
-  study_id: string
-  description: string | null
-  modality: string | null
-  instances: DicomInstance[]
-  instance_count: number
-  bytes_total: number
-  headerless: boolean
-}
-
-export interface DicomSeriesSummary {
-  series_id: string
-  description: string | null
+export interface SourceSummary {
+  source_id: string
+  kind: SourceKind
+  name: string
+  /** Name as discovered at upload, kept so a rename stays reversible. */
+  original_name: string | null
+  workspace_id: string
+  set_id: string
+  created_at: string
   modality: string | null
   instance_count: number
   bytes_total: number
   headerless: boolean
+  renderable: boolean
+  /** Present when renderable is false: why there is nothing to draw. */
+  render_reason: string | null
+}
+
+export interface VolumeHeader {
+  dims: [number, number, number]
+  spacing: [number, number, number]
+  origin: [number, number, number]
+  byte_length: number
+  value_range: [number, number]
+  window_center: number | null
+  window_width: number | null
+}
+
+export interface VolumePayload {
+  header_ref: string
+  bin_ref: string
+  header: VolumeHeader
 }
