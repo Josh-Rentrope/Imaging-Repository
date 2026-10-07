@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { SourceSummary } from '../lib/types'
 import { useEditor } from '../state/editor'
 import { DropZone } from './DropZone'
+import { Section } from './Section'
 
 function meta(source: SourceSummary): string {
   if (source.kind === 'dicom') return `${source.instance_count} slice${source.instance_count === 1 ? '' : 's'}`
@@ -97,12 +98,7 @@ export function SourceSection({
   const { sources, sourcesLoading, sourcesError, activeSourceId } = useEditor()
 
   return (
-    <div className="section">
-      <h2 className="section-title">
-        Sources
-        {sources.length > 0 && <span className="section-count">{sources.length}</span>}
-      </h2>
-
+    <Section id="sources" title="Sources" count={sources.length > 0 ? sources.length : undefined}>
       <DropZone onFiles={onFiles} disabled={uploading} />
 
       {uploading && <p className="muted" style={{ margin: '8px 0 0' }}>Uploading…</p>}
@@ -125,6 +121,6 @@ export function SourceSection({
           Double-click a name to rename.
         </p>
       )}
-    </div>
+    </Section>
   )
 }

@@ -143,6 +143,22 @@ export interface ResultEnvelope {
     voxel_size_mm?: number
     frames_used?: number
     registration_residual_mm?: number
+    /**
+     * Where the segmentation landed, relative to the volume it was computed on.
+     *
+     * Both boxes cover the same field of view, so a low overlap means one of
+     * them is misplaced — a failure that is invisible from the mask's own
+     * numbers, because from the mask's point of view its geometry is correct.
+     */
+    mask_placement?: {
+      mask_bounds: number[]
+      volume_bounds: number[]
+      /** Share of the mask's box that lands inside the volume's, 0–100. */
+      overlap_pct: number
+      centre_offset_mm: number[]
+      agrees: boolean
+      note?: string
+    }
     /** Density threshold an extracted surface was taken at, in the volume's units. */
     threshold?: number
     stride?: number

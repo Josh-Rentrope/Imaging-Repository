@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { api } from '../lib/api'
 import { Info } from './Info'
 import type { ResultView } from './ResultsSection'
+import { Section } from './Section'
 
 /**
  * Formats offered, and what each is actually for.
@@ -66,31 +67,33 @@ export function ExportSection({ results }: { results: ResultView[] }) {
 
   if (available.length === 0) {
     return (
-      <div className="section">
-        <h2 className="section-title">Export</h2>
+      <Section id="export" title="Export" defaultOpen={false}>
         <p className="muted" style={{ margin: 0 }}>
           Run something that produces geometry.
         </p>
-      </div>
+      </Section>
     )
   }
 
   return (
-    <div className="section">
-      <h2 className="section-title">
-        Export
-        {available.length > 1 && (
-          <span className="section-count">
+    <Section
+      id="export"
+      title="Export"
+      // Passed as actions rather than nested in the title, so that clicking
+      // "all" selects everything and does not also collapse this panel.
+      actions={
+        available.length > 1 && (
+          <>
             <button className="ghost" onClick={() => setSelected(available.map((r) => r.id))}>
               all
             </button>
             <button className="ghost" onClick={() => setSelected([])}>
               none
             </button>
-          </span>
-        )}
-      </h2>
-
+          </>
+        )
+      }
+    >
       {/* Layers: one entry per result, because a run that produced several
           meshes is several things to hand over, not one. */}
       <ul className="source-list">
@@ -156,6 +159,6 @@ export function ExportSection({ results }: { results: ResultView[] }) {
           {error}
         </p>
       )}
-    </div>
+    </Section>
   )
 }

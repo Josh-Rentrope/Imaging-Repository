@@ -91,24 +91,6 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "voxel_size_mm": {
-          "type": "number"
-        },
-        "frames_used": {
-          "type": "integer"
-        },
-        "registration_residual_mm": {
-          "type": "number"
-        },
-        "threshold": {
-          "type": "number",
-          "description": "Density threshold the surface was extracted at, in the volume's units."
-        },
-        "stride": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Voxel subsampling applied before extraction."
-        },
         "bounds": {
           "type": "array",
           "items": {
@@ -118,23 +100,82 @@
           "maxItems": 6,
           "description": "[xmin, xmax, ymin, ymax, zmin, zmax] of the extracted surface, world space."
         },
-        "simplify_mm": {
-          "type": "number",
-          "description": "Clustering cell size the surface was simplified at, in millimetres. Absent when it was not simplified. Absolute rather than a multiple of the voxel size, so the same setting means the same thing on a 0.7 mm mask and a 2.5 mm volume."
-        },
-        "vertices_before": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "Vertices before simplifying, so the reduction is a stated fact rather than an assumption."
-        },
-        "triangles_before": {
-          "type": "integer",
-          "minimum": 0
-        },
         "frames": {
           "type": "integer",
           "minimum": 0,
           "description": "Frames the pose stage was given."
+        },
+        "frames_used": {
+          "type": "integer"
+        },
+        "mask_dims": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "minItems": 3,
+          "maxItems": 3,
+          "description": "Voxel dimensions of the segmentation mask, which is its own grid: a segmenter resamples, so it does not match the source volume's dims."
+        },
+        "mask_placement": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "description": "Where a segmentation landed relative to the volume it was computed on. Both cover the same field of view, so a low overlap means one of them is misplaced \u2014 which is invisible from the mask's own numbers, since from the mask's point of view its geometry is correct.",
+          "properties": {
+            "mask_bounds": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 6,
+              "maxItems": 6,
+              "description": "[xmin, xmax, ymin, ymax, zmin, zmax] in world space, as geometry.bounds."
+            },
+            "volume_bounds": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 6,
+              "maxItems": 6
+            },
+            "overlap_pct": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "Share of the mask's box that lands inside the volume's."
+            },
+            "centre_offset_mm": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "agrees": {
+              "type": "boolean"
+            },
+            "note": {
+              "type": "string"
+            }
+          }
+        },
+        "mask_spacing": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 3,
+          "maxItems": 3,
+          "description": "Voxel size of the mask in millimetres, in mask axis order."
+        },
+        "pose_solver": {
+          "type": "string",
+          "description": "Which framework produced the trajectory, when one did. Absent when the device supplied poses. See GET /solvers for the known names."
         },
         "pose_source": {
           "type": "string",
@@ -145,14 +186,13 @@
           ],
           "description": "Where the camera trajectory came from. `placeholder` means no solver ran and the geometry is not a trajectory."
         },
-        "pose_solver": {
-          "type": "string",
-          "description": "Which framework produced the trajectory, when one did. Absent when the device supplied poses. See GET /solvers for the known names."
-        },
         "poses_solved": {
           "type": "integer",
           "minimum": 0,
           "description": "Poses solved here. Zero when the capture brought its own, or when nothing solved them."
+        },
+        "registration_residual_mm": {
+          "type": "number"
         },
         "reprojection_residual_px": {
           "type": "number",
@@ -162,6 +202,31 @@
         "scale_known": {
           "type": "boolean",
           "description": "Whether the trajectory is metric. A solved one never is, which is why this is separate from scale.verified."
+        },
+        "simplify_mm": {
+          "type": "number",
+          "description": "Clustering cell size the surface was simplified at, in millimetres. Absent when it was not simplified. Absolute rather than a multiple of the voxel size, so the same setting means the same thing on a 0.7 mm mask and a 2.5 mm volume."
+        },
+        "stride": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Voxel subsampling applied before extraction."
+        },
+        "threshold": {
+          "type": "number",
+          "description": "Density threshold the surface was extracted at, in the volume's units."
+        },
+        "triangles_before": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "vertices_before": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Vertices before simplifying, so the reduction is a stated fact rather than an assumption."
+        },
+        "voxel_size_mm": {
+          "type": "number"
         }
       }
     },

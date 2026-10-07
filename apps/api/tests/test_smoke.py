@@ -1834,3 +1834,143 @@ def test_an_import_that_falls_back_leaves_no_orphan_source(client, monkeypatch):
     listed = client.get("/sources?workspace_id=w&set_id=s").json()
     assert len(listed) == 1, [entry["name"] for entry in listed]
     assert listed[0]["source_id"] == response.json()["source_id"]
+
+
+# ── does the segmentation land on the volume it came from? ─────────────────
+
+
+def _grid(dims, spacing, origin, direction=None) -> dict:
+    grid = {"dims": dims, "spacing": spacing, "origin": origin}
+    if direction is not None:
+        grid["direction"] = direction
+    return grid
+
+
+def test_a_mask_on_the_same_field_of_view_agrees():
+    """The normal case: the segmenter resamples, but to the same extent."""
+    from app.pipeline.isosurface import placement
+
+    volume = _grid([256, 256, 51], [1.3671875, 1.3671875, 10.0], [-179.658, -325.658, -754.3])
+    mask = _grid(
+        [512, 512, 101],
+        [0.68359375, 0.68359375, 5.0],
+        [-179.658203125, 23.658203125, -754.2999877929688],
+        # The RAS/LPS swap flips y, which puts the origin at the opposite corner
+        # of the *same* box. Origins disagree wildly; the geometry does not.
+        [1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0],
+    )
+
+    report = placement(mask, volume)
+    assert report["agrees"] is True
+    assert report["overlap_pct"] > 99
+    # The centres are nearly the same point, which is the thing that would move
+    # if the mask were mirrored rather than merely re-origined.
+    assert max(abs(v) for v in report["centre_offset_mm"]) < 2.0
+
+
+def test_a_mirrored_mask_is_caught():
+    """The failure the check exists for: right shape, wrong place.
+
+    Every number inside the mask is self-consistent here — same dims, same
+    spacing, a plausible origin. Nothing about the mask alone says it is wrong.
+    Only comparing its world box to the volume's does.
+    """
+    from app.pipeline.isosurface import placement
+
+    volume = _grid([256, 256, 51], [1.3671875, 1.3671875, 10.0], [-179.658, -325.658, -754.3])
+    # Same size and spacing, translated far away along x.
+    mask = _grid([512, 512, 101], [0.68359375, 0.68359375, 5.0], [900.0, -325.0, -754.3])
+
+    report = placement(mask, volume)
+    assert report["agrees"] is False
+    assert report["overlap_pct"] == 0.0
+    assert abs(report["centre_offset_mm"][0]) > 500
+
+
+def test_a_single_flipped_axis_is_caught_and_is_diagnosable():
+    """One axis disagreeing is the signature of a flip, not of a translation."""
+    from app.pipeline.isosurface import placement
+
+    volume = _grid([100, 100, 100], [1.0, 1.0, 1.0], [-50.0, -50.0, -50.0])
+    # z negated: the box now runs the other way from the same origin.
+    flipped = _grid(
+        [100, 100, 100],
+        [1.0, 1.0, 1.0],
+        [-50.0, -50.0, -50.0],
+        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0],
+    )
+
+    report = placement(flipped, volume)
+    assert report["agrees"] is False
+    assert report["overlap_pct"] == 0.0
+    # Bounds are [xmin, xmax, ymin, ymax, zmin, zmax], the same convention as
+    # `geometry.bounds`. x and y still line up; z does not — which is what
+    # points at the axis responsible.
+    assert report["mask_bounds"][0:4] == report["volume_bounds"][0:4]
+    assert report["mask_bounds"][4:6] != report["volume_bounds"][4:6]
+
+
+def test_the_segment_result_records_where_the_mask_landed(client, monkeypatch):
+    """On the result, next to the geometry, on every run.
+
+    Not a log line and not a manual check: when this is wrong the result looks
+    entirely well-formed, so the comparison has to be part of the result.
+    """
+    use_stub_segmenter(monkeypatch)
+    source = upload_blocky_series(client, slices=6)
+    job = run_segment(client, source["source_id"])
+
+    assert job["status"] == "succeeded", job["error"]
+    geometry = job["result"]["geometry"]
+    report = geometry["mask_placement"]
+
+    assert report["agrees"] is True
+    assert report["overlap_pct"] > 90
+    assert len(report["mask_bounds"]) == 6
+    assert len(report["volume_bounds"]) == 6
+    # Bounds are [xmin, xmax, ymin, ymax, zmin, zmax], the same convention
+    # `geometry.bounds` uses. The stub writes a mask on the volume's own grid,
+    # so the two boxes should coincide rather than merely overlap.
+    for axis, (mask_low, mask_high, vol_low, vol_high) in enumerate(
+        zip(
+            report["mask_bounds"][0::2],
+            report["mask_bounds"][1::2],
+            report["volume_bounds"][0::2],
+            report["volume_bounds"][1::2],
+            strict=True,
+        )
+    ):
+        assert abs(mask_low - vol_low) < 1.0, axis
+        assert abs(mask_high - vol_high) < 1.0, axis
+
+    assert not any("disagree about where space is" in w for w in job["result"]["warnings"])
+
+
+def test_a_dicom_segment_envelope_matches_the_contract(client, monkeypatch):
+    """The volumetric path is the one that writes mask_placement.
+
+    The contract test in test_solvers.py runs captures with no source, which
+    take the synthetic path — so it never saw a `segment` result carrying the
+    placement check, and the schema's `additionalProperties: false` would not
+    have caught the field being undeclared.
+    """
+    import jsonschema
+
+    use_stub_segmenter(monkeypatch)
+    source = upload_blocky_series(client, slices=6)
+    job = run_segment(client, source["source_id"])
+    assert job["status"] == "succeeded", job["error"]
+
+    schema = json.loads(
+        (Path(__file__).resolve().parents[3] / "contracts" / "results.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    errors = sorted(
+        jsonschema.Draft202012Validator(schema).iter_errors(job["result"]),
+        key=lambda error: list(error.path),
+    )
+    assert not errors, "; ".join(
+        f"{'/'.join(str(p) for p in e.path)}: {e.message}" for e in errors
+    )
+    assert job["result"]["geometry"]["mask_placement"] is not None

@@ -1,6 +1,7 @@
 import { Op, type InputShape, type SolverEntry, type Stage } from '../lib/types'
 import { Info } from './Info'
 import { LabelTree } from './LabelTree'
+import { Section } from './Section'
 
 /**
  * What kind of data this is, and therefore what can be done to it.
@@ -289,9 +290,7 @@ export function PipelineSection({
   const step = valueRange ? Math.max(1, Math.round(span / 200)) : 10
 
   return (
-    <div className="section">
-      <h2 className="section-title">Pipeline</h2>
-
+    <Section id="pipeline" title="Pipeline">
       <label className="field" style={{ marginBottom: 6 }}>
         <span className="field-label">workflow</span>
         <select
@@ -517,6 +516,6 @@ export function PipelineSection({
           </span>
         )}
       </div>
-    </div>
+    </Section>
   )
 }

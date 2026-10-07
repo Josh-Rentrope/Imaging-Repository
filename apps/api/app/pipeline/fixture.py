@@ -34,7 +34,7 @@ from .interfaces import (
     Op,
     OpNotSupported,
 )
-from .isosurface import SurfaceError, extract, extract_labelled
+from .isosurface import SurfaceError, extract, extract_labelled, placement
 from .meshgen import build_dental_arch, to_ply
 from .ply import write_ply
 
@@ -362,10 +362,52 @@ def _segment_volume(envelope: dict, params: dict, context: dict, sources, record
 
     # The mask keeps its own geometry. If our assembled volume was strided down
     # they will not match, and per-label extraction has to run on the mask.
-    envelope["geometry"] = {
+    geometry: dict[str, Any] = {
         "mask_dims": list(seg.dims),
         "mask_spacing": [float(v) for v in seg.spacing],
     }
+
+    # Whether the mask actually landed on the volume it came from.
+    #
+    # Recorded on every run rather than checked by hand, because when this is
+    # wrong nothing about the result looks wrong: the mask's own numbers are
+    # self-consistent, and the geometry simply renders somewhere else. The two
+    # boxes cover the same field of view — the segmenter resamples, but to the
+    # same extent — so a low overlap means one of them is misplaced.
+    volume_header = _volume_header(storage, record)
+    if volume_header is not None:
+        report = placement(header, volume_header)
+        geometry["mask_placement"] = report
+        if not report["agrees"]:
+            geometry["mask_placement"]["note"] = (
+                "the segmentation and the volume it was computed from occupy "
+                "different world boxes; the geometry may be drawn away from the scan"
+            )
+            envelope["warnings"].append(
+                f"The segmentation covers only {report['overlap_pct']:.0f}% of the "
+                "source volume's volume, so the two disagree about where space is. "
+                "Check the slice geometry of this series before trusting the result."
+            )
+
+    envelope["geometry"] = geometry
+
+
+def _volume_header(storage: Storage, record: Any) -> dict[str, Any] | None:
+    """The source's own volume header, when it has one.
+
+    Read back rather than recomputed: the point of the comparison is that the
+    mask and the volume agree, so the volume's numbers have to be the ones the
+    viewer will actually render with.
+    """
+    ref = getattr(record, "volume_header_ref", None)
+    if not ref:
+        return None
+    try:
+        return json.loads(storage.get(ref).decode("utf-8"))
+    except Exception:
+        # A source whose header cannot be read is a different problem, and not
+        # one worth failing a segmentation over.
+        return None
 
 
 def _segment_synthetic(envelope: dict, params: dict) -> None:

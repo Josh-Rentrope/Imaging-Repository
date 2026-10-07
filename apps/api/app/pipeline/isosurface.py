@@ -46,6 +46,84 @@ def world_transform(
     return rotation @ np.diag(spacing), origin
 
 
+def bounds_pair(low: np.ndarray, high: np.ndarray) -> list[float]:
+    """Interleave a min/max pair into the `bounds` convention.
+
+    `[xmin, xmax, ymin, ymax, zmin, zmax]`, matching `geometry.bounds` on the
+    result. Two orderings of the same six numbers is a bug that reads as correct
+    at every glance, so there is one ordering and it is made in one place.
+    """
+    return [
+        round(float(v), 3)
+        for axis in range(3)
+        for v in (low[axis], high[axis])
+    ]
+
+
+def world_bounds(header: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    """World-space bounding box of a voxel grid, over the eight grid corners.
+
+    A bounding box rather than the origin, because an axis flip puts the origin
+    at the *opposite corner of the same physical box*: two headers can disagree
+    about the origin while describing identical geometry. Comparing origins
+    therefore reports a discrepancy that is not there, and can agree while the
+    boxes do not — so the box is what gets compared.
+    """
+    dims = [int(v) for v in header["dims"]]
+    basis, origin = world_transform(header)
+
+    corners = np.array(
+        [
+            [i, j, k]
+            for i in (0, dims[0] - 1)
+            for j in (0, dims[1] - 1)
+            for k in (0, dims[2] - 1)
+        ],
+        dtype=np.float64,
+    )
+    world = corners @ basis.T + origin
+    return world.min(axis=0), world.max(axis=0)
+
+
+def placement(mask: dict[str, Any], volume: dict[str, Any]) -> dict[str, Any]:
+    """How a segmentation's world box sits relative to the volume it came from.
+
+    This exists to be checked *every run* rather than noticed by eye. The failure
+    it catches is a mask transformed differently from the volume it was computed
+    on, which renders somewhere else entirely — and nothing in the mask's own
+    numbers can reveal that, because from the mask's point of view its geometry
+    is self-consistent. Only a comparison can.
+
+    TotalSegmentator resamples to its own grid, so the two boxes never match
+    exactly, but they cover the same field of view: a `overlap_pct` far below 100
+    means one of them is not where it claims to be.
+    """
+    mask_low, mask_high = world_bounds(mask)
+    volume_low, volume_high = world_bounds(volume)
+
+    # Overlap per axis, which is also what makes the number diagnosable: three
+    # axes overlapping says the boxes agree, one axis not says a single flip.
+    low = np.maximum(mask_low, volume_low)
+    high = np.minimum(mask_high, volume_high)
+    extent = np.maximum(high - low, 0.0)
+
+    mask_size = np.maximum(mask_high - mask_low, 1e-9)
+    # The fraction of the mask's box that lands inside the volume's box, by
+    # volume. Not a per-axis average, which would call a mask that is entirely
+    # outside in one axis "two thirds correct".
+    overlap_pct = float(100.0 * np.prod(extent / mask_size))
+
+    centre_offset = (mask_low + mask_high) / 2 - (volume_low + volume_high) / 2
+
+    return {
+        "mask_bounds": bounds_pair(mask_low, mask_high),
+        "volume_bounds": bounds_pair(volume_low, volume_high),
+        "overlap_pct": round(overlap_pct, 2),
+        "centre_offset_mm": [round(float(v), 3) for v in centre_offset],
+        "agrees": bool(overlap_pct >= 75.0),
+    }
+
+
 def _orient(faces: np.ndarray, basis: np.ndarray) -> np.ndarray:
     """Winding for a surface going from array order (z, y, x) into world.
 
@@ -236,7 +314,6 @@ def extract_labelled(
     whole volume.
     """
     dims = [int(v) for v in header["dims"]]  # [nx, ny, nz]
-    spacing = [float(v) for v in header["spacing"]]
     basis, origin = world_transform(header)
     nx, ny, nz = dims
 

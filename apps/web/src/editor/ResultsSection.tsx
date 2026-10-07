@@ -3,6 +3,13 @@ import { useState } from 'react'
 import type { Job, SourceKind } from '../lib/types'
 import { Info } from './Info'
 import { ProvenanceHover } from './ProvenancePopup'
+import { Section } from './Section'
+
+/** How far the segmentation's box sits from the volume's, said in one line. */
+function formatOffset(offset: number[]): string {
+  const distance = Math.sqrt(offset.reduce((total, value) => total + value * value, 0))
+  return `${Math.round(distance)} mm`
+}
 
 /** A pipeline result being displayed, with its own display flags. */
 export interface ResultView {
@@ -69,6 +76,8 @@ function ResultRow({
   const failed = result.job.status === 'failed' || result.job.status === 'rejected'
   const pending = result.job.status === 'queued' || result.job.status === 'running'
   const note = summary(result.job)
+  const warnings = result.job.result?.warnings ?? []
+  const placement = result.job.result?.geometry?.mask_placement ?? null
   const [editing, setEditing] = useState<string | null>(null)
 
   const commitRename = () => {
@@ -138,7 +147,27 @@ function ResultRow({
       ) : pending ? (
         <div className="result-meta mono pending-text">{result.job.status}…</div>
       ) : (
-        <div className="result-meta mono">{note ?? result.detail}</div>
+        <>
+          <div className="result-meta mono">
+            {/* A warning nobody hovers over is a warning nobody reads, so the
+                marker is on the row and the text is in the popup. */}
+            {warnings.length > 0 && (
+              <span className="result-warn" title={warnings.join('\n\n')}>
+                ⚠{warnings.length > 1 ? ` ${warnings.length}` : ''}{' '}
+              </span>
+            )}
+            {note ?? result.detail}
+          </div>
+          {/* Plus the placement check, when it ran. This is the one number that
+              says whether the segmentation landed on the scan it came from, and
+              it is unreadable from the geometry itself. */}
+          {placement && (
+            <div className={`result-meta mono${placement.agrees ? '' : ' warn-text'}`}>
+              mask {placement.overlap_pct.toFixed(1)}% inside volume
+              {placement.agrees ? '' : ` · off by ${formatOffset(placement.centre_offset_mm)}`}
+            </div>
+          )}
+        </>
       )}
     </li>
   )
@@ -169,17 +198,18 @@ export function ResultsSection({
   const shown = results.filter((r) => r.visible).length
 
   return (
-    <div className="section">
-      <h2 className="section-title">
-        Results
-        <span className="section-count">
-          {shown}/{results.length}
-          <button onClick={onClear} title="Delete every result" style={{ marginLeft: 8, padding: '0 6px' }}>
-            clear
-          </button>
-        </span>
-      </h2>
-
+    <Section
+      id="results"
+      title="Results"
+      count={`${shown}/${results.length}`}
+      // `clear` deletes every result, so it must not also collapse the panel it
+      // lives in — the count is a sibling of the toggle for the same reason.
+      actions={
+        <button onClick={onClear} title="Delete every result">
+          clear
+        </button>
+      }
+    >
       <ul className="source-list">
         {results.map((result) => (
           <ResultRow
@@ -199,6 +229,6 @@ export function ResultsSection({
         each result has its own settings
         <Info text="Change the parameters above and run again to compare — a new result is added rather than replacing the last one, and each keeps its own visibility, clipping and parameters. ✂ marks the ones the cutting planes act on." />
       </p>
-    </div>
+    </Section>
   )
 }
