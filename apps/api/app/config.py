@@ -35,6 +35,10 @@ class Settings(BaseModel):
 
     enable_diagnostic_tasks: bool = False
 
+    #: Log level for the application's own logging. `DEBUG` turns on the store
+    #: calls in botocore too, which is how a Spaces problem is diagnosed.
+    log_level: str = "INFO"
+
     #: Whether `POST /sources/remote` will fetch a URL the caller names.
     #:
     #: On by default because it is what makes local work convenient, and off in
@@ -88,6 +92,7 @@ def get_settings() -> Settings:
         backend=os.environ.get("BONE_VIEWER_BACKEND", "auto"),
         cors_origins=os.environ.get("BONE_VIEWER_CORS_ORIGINS", "*"),
         enable_diagnostic_tasks=_truthy(os.environ.get("BONE_VIEWER_ENABLE_DIAGNOSTIC", "")),
+        log_level=os.environ.get("BONE_VIEWER_LOG_LEVEL", "INFO").strip().upper(),
         enable_remote_fetch=_truthy_default(
             os.environ.get("BONE_VIEWER_ENABLE_REMOTE_FETCH", ""), True
         ),

@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from fastapi import HTTPException
 
 from .models import Job, JobCreate, JobStatus
+from .observability import logger
 from .pipeline import (
     DIAGNOSTIC_OPS,
     BackendRegistry,
@@ -109,12 +110,22 @@ class JobStore:
         bucket = self._jobs.setdefault(viewer, {})
         try:
             keys = self._storage.list_keys(_JOBS_PREFIX)
-        except (OSError, ValueError, HTTPException):
+        except (OSError, ValueError, HTTPException) as exc:
             # A store that cannot be listed is a store with nothing to show, not
             # a reason to refuse to start. This runs during startup, so letting it
             # out would mean an API that will not boot because a bucket was
-            # briefly unreachable -- and empty-but-up beats down. The write path
-            # is where the real problem gets reported.
+            # briefly unreachable -- and empty-but-up beats down.
+            #
+            # Logged, because the visible symptom is otherwise "my results are
+            # gone": the viewer's history comes back empty and nothing anywhere
+            # says the listing failed rather than found nothing.
+            logger.warning(
+                "could not list stored jobs for viewer %s -- %s: %s. Reporting no "
+                "history, which is indistinguishable from having none.",
+                viewer or "(single namespace)",
+                type(exc).__name__,
+                exc,
+            )
             return
         for key in keys:
             try:
@@ -182,6 +193,7 @@ class JobStore:
         if self._storage is not None:
             with suppress(OSError, ValueError, HTTPException):
                 self._storage.remove_tree(_job_key(job_id))
+                logger.debug("removed record for job %s", job_id)
         self._remove_artifacts(job)
         return job
 
@@ -192,9 +204,19 @@ class JobStore:
         if not result_id:
             return
         # The record is already gone; a file that will not delete is not a reason
-        # to fail the request.
-        with suppress(OSError, ValueError, HTTPException):
+        # to fail the request. It is a reason to say so, though: an artifact that
+        # will not delete is either a store that is not answering or a key that
+        # has drifted, and both are worth knowing about before they fill a bucket.
+        try:
             self._storage.remove_tree(f"artifacts/{result_id}")
+        except (OSError, ValueError, HTTPException) as exc:
+            logger.warning(
+                "job %s: could not remove artifacts/%s -- %s: %s",
+                job.job_id,
+                result_id,
+                type(exc).__name__,
+                exc,
+            )
 
     def _replace(self, job_id: str, **fields) -> Job | None:
         """Update a job under the lock, returning the new state.
@@ -217,10 +239,22 @@ class JobStore:
         if self._storage is None:
             return
         # A record that will not persist must not take the job with it: the
-        # in-memory copy is still the truth for this process.
-        with suppress(OSError, HTTPException):
+        # in-memory copy is still the truth for this process. But the job is then
+        # only as durable as the process, and it will not survive the next
+        # restart -- which is the one thing persistence exists for, so it is
+        # logged rather than swallowed.
+        try:
             self._storage.put(
                 _job_key(job.job_id), job.model_dump_json(indent=2).encode("utf-8")
+            )
+        except (OSError, HTTPException) as exc:
+            logger.warning(
+                "job %s (%s) was NOT persisted to the store -- %s: %s. It exists "
+                "only in this process and will be lost on restart.",
+                job.job_id,
+                job.status,
+                type(exc).__name__,
+                exc,
             )
 
     def submit(self, request: JobCreate, allow_diagnostic_server: bool) -> Job:

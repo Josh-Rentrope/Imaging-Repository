@@ -234,9 +234,17 @@ def get_image(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no slice {index} of {nz}")
 
     nx, ny, _ = dims
+    # One plane, not the volume. The blob is a C-ordered (nz, ny, nx) float32
+    # array, so a plane is a contiguous run of bytes and can be asked for on its
+    # own -- which it has to be, because the store is now a bucket: reading the
+    # whole object to return one slice meant downloading the entire study's
+    # volume, tens of megabytes, for every thumbnail in the strip.
+    plane_bytes = nx * ny * 4
     plane = np.frombuffer(
-        store.storage.get(payload.bin_ref), dtype="<f4", count=nx * ny * nz
-    ).reshape(nz, ny, nx)[index]
+        store.storage.get_range(payload.bin_ref, index * plane_bytes, plane_bytes),
+        dtype="<f4",
+        count=nx * ny,
+    ).reshape(ny, nx)
 
     centre, width = _window(record, plane, level, window)
     low = centre - width / 2

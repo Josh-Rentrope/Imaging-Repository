@@ -209,6 +209,9 @@ class ViewerScopedStorage:
     def get(self, ref: str) -> bytes:
         return self._base.get(self._admitted(ref))
 
+    def get_range(self, ref: str, start: int, length: int) -> bytes:
+        return self._base.get_range(self._admitted(ref), start, length)
+
     def exists(self, ref: str) -> bool:
         try:
             return self._base.exists(self._admitted(ref))

@@ -95,6 +95,8 @@ class Storage(Protocol):
 
     def get(self, ref: str) -> bytes: ...
 
+    def get_range(self, ref: str, start: int, length: int) -> bytes: ...
+
     def exists(self, ref: str) -> bool: ...
 
     def ref(self, key: str) -> str: ...
@@ -148,6 +150,31 @@ class LocalStorage:
         if not path.is_file():
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"missing artefact {ref!r}")
         return path.read_bytes()
+
+    def get_range(self, ref: str, start: int, length: int) -> bytes:
+        """Read a slice of an object without reading the object.
+
+        The volume blob is a C-ordered array, so a single image plane is a
+        contiguous byte range. Serving one plane by fetching the whole volume was
+        affordable while the store was a local directory and became ruinous when
+        it moved to a bucket -- 31 MB over the network per thumbnail, against
+        256 KB for the plane actually wanted.
+        """
+        path = self._path(key_from_ref(ref))
+        if not path.is_file():
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"missing artefact {ref!r}")
+        with path.open("rb") as handle:
+            handle.seek(start)
+            data = handle.read(length)
+        if len(data) != length:
+            raise HTTPException(
+                status.HTTP_416_RANGE_NOT_SATISFIABLE,
+                detail=(
+                    f"{ref!r} is shorter than the range asked for "
+                    f"({start}+{length}): the stored object looks truncated"
+                ),
+            )
+        return data
 
     def exists(self, ref: str) -> bool:
         try:

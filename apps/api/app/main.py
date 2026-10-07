@@ -13,9 +13,20 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import Settings, get_settings
 from .jobs import JobStore
+from .observability import AccessLogMiddleware, configure, logger, startup_report
 from .pipeline import BackendRegistry
 from .pipeline import solvers as solver_registry
-from .routers import artifacts, exports, health, jobs, samples, segmenter, solvers, sources
+from .routers import (
+    artifacts,
+    diagnostics,
+    exports,
+    health,
+    jobs,
+    samples,
+    segmenter,
+    solvers,
+    sources,
+)
 from .sources import SourceStore
 from .spaces import SpacesStorage
 from .storage import LocalStorage, Storage
@@ -56,6 +67,7 @@ def build_storage(settings: Settings) -> Storage:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    configure(settings)
     # Discover camera-pose solvers published by the core distribution. Absent is
     # the normal case for a checkout of this repo, and is not an error.
     solver_registry.load_registered()
@@ -81,6 +93,12 @@ async def lifespan(app: FastAPI):
         # their first request instead.
         preload=not settings.multi_tenant,
     )
+    # Last, so it reports the app fully wired rather than half-built. Every
+    # container start logs this, which is also how a restart becomes visible: a
+    # second banner in the log is a second container.
+    logger.info(
+        startup_report(settings, app.state.storage, routes=len(app.routes))
+    )
     yield
 
 
@@ -95,10 +113,16 @@ def create_app() -> FastAPI:
     )
 
     # Middleware is applied inside-out, so the one added *last* ends up
-    # outermost. CORS is added last on purpose: it then wraps the viewer, which
-    # means a preflight is answered without touching a viewer, and a failure
-    # inside the viewer still comes back with CORS headers instead of surfacing
-    # in the browser as an opaque cross-origin error.
+    # outermost. Added in this order the stack is, outermost first:
+    #
+    #     CORS  ->  viewer  ->  access log  ->  routes
+    #
+    # which is the order each one needs. CORS outermost so a preflight is answered
+    # without touching a viewer, and so a failure inside the viewer still comes
+    # back with CORS headers rather than surfacing in the browser as an opaque
+    # cross-origin error. The access log *inside* the viewer, because the one
+    # thing it adds over the default log is which viewer a request served, and
+    # that is only in scope once the viewer has run.
     #
     # Credentials are allowed only when specific origins are named, because `*`
     # and credentials are contradictory: a browser refuses a wildcard origin on a
@@ -110,6 +134,7 @@ def create_app() -> FastAPI:
     # either way.
     named_origins = "*" not in settings.cors_origin_list
 
+    app.add_middleware(AccessLogMiddleware)
     app.add_middleware(ViewerMiddleware)
     app.add_middleware(
         CORSMiddleware,
@@ -120,6 +145,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(health.router)
+    app.include_router(diagnostics.router)
     app.include_router(segmenter.router)
     app.include_router(jobs.router)
     app.include_router(sources.router)

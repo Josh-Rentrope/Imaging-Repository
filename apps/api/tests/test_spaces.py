@@ -45,17 +45,23 @@ class FakeS3:
         self.objects: dict[str, bytes] = {}
         self.page_size = 1000
         self.calls: list[str] = []
+        self.last_range: str | None = None
 
     def put_object(self, Bucket: str, Key: str, Body: bytes) -> dict:
         self.calls.append("put_object")
         self.objects[Key] = Body if isinstance(Body, bytes) else bytes(Body)
         return {}
 
-    def get_object(self, Bucket: str, Key: str) -> dict:
+    def get_object(self, Bucket: str, Key: str, Range: str | None = None) -> dict:
         self.calls.append("get_object")
         if Key not in self.objects:
             raise _error("NoSuchKey", 404)
-        return {"Body": io.BytesIO(self.objects[Key])}
+        body = self.objects[Key]
+        if Range:
+            self.last_range = Range
+            start, _, end = Range.removeprefix("bytes=").partition("-")
+            body = body[int(start) : int(end) + 1]
+        return {"Body": io.BytesIO(body)}
 
     def head_object(self, Bucket: str, Key: str) -> dict:
         self.calls.append("head_object")
@@ -198,6 +204,104 @@ def test_the_bucket_refuses_to_be_emptied():
     store, _ = bucket()
     with pytest.raises(RuntimeError):
         store.reset()
+
+
+# ── ranges: how one image plane is fetched from a volume ────────────────────
+
+
+def test_a_range_asks_the_bucket_for_only_that_range():
+    """The whole point: the object is addressed, not read.
+
+    Before this, serving one image plane downloaded the entire volume -- tens of
+    megabytes over the network for each thumbnail, which is what saturated the
+    request path into gateway timeouts.
+    """
+    store, fake = bucket()
+    blob = bytes(range(256)) * 4
+    store.put("artifacts/r/volume.bin", blob)
+
+    got = store.get_range("local://artifacts/r/volume.bin", 100, 50)
+
+    assert got == blob[100:150]
+    assert fake.last_range == "bytes=100-149", fake.last_range
+
+
+def test_a_range_past_the_end_is_refused_rather_than_short():
+    """A short read means the stored volume is truncated. Returning fewer bytes
+    than asked for would reshape into a wrong-sized plane and silently draw the
+    wrong image."""
+    store, _ = bucket()
+    store.put("artifacts/r/volume.bin", b"0123456789")
+
+    with pytest.raises(HTTPException) as short:
+        store.get_range("local://artifacts/r/volume.bin", 8, 50)
+    assert short.value.status_code == 416
+
+
+def test_the_plane_offset_matches_slicing_the_whole_array():
+    """The arithmetic that decides *which* plane comes back.
+
+    An off-by-one here is not a performance bug, it is a wrong image: the viewer
+    would show a different slice than the one asked for, and nothing about the
+    response would look wrong. So the range read is checked against the answer
+    the old whole-object read gave.
+    """
+    import numpy as np
+
+    nz, ny, nx = 4, 3, 5
+    volume = np.arange(nz * ny * nx, dtype="<f4").reshape(nz, ny, nx)
+    blob = volume.tobytes("C")
+
+    store, _ = bucket()
+    store.put("artifacts/r/volume.bin", blob)
+    ref = "local://artifacts/r/volume.bin"
+    plane_bytes = nx * ny * 4
+
+    for index in range(nz):
+        by_range = np.frombuffer(
+            store.get_range(ref, index * plane_bytes, plane_bytes), dtype="<f4", count=nx * ny
+        ).reshape(ny, nx)
+        assert np.array_equal(by_range, volume[index]), f"slice {index} came back wrong"
+
+
+def test_a_local_store_reads_a_range_too():
+    """Both backends have to answer the same question, or the slice endpoint
+    works on one deployment and not another."""
+    import tempfile
+    from pathlib import Path
+
+    from app.storage import LocalStorage
+
+    with tempfile.TemporaryDirectory() as tmp:
+        storage = LocalStorage(Path(tmp) / "s")
+        blob = bytes(range(256)) * 4
+        storage.put("artifacts/r/volume.bin", blob)
+
+        assert storage.get_range("local://artifacts/r/volume.bin", 10, 20) == blob[10:30]
+        with pytest.raises(HTTPException):
+            storage.get_range("local://artifacts/r/volume.bin", 2000, 10)
+
+
+def test_a_range_outside_the_viewers_own_folder_is_refused(tmp_path):
+    """Scoping applies to ranges as much as to whole objects, or it would be a
+    way round it."""
+    from app.storage import LocalStorage
+    from app.tenancy import ViewerScopedStorage, current_folder
+
+    scoped = ViewerScopedStorage(LocalStorage(tmp_path / "s"), enabled=True)
+    token = current_folder.set("aaaa")
+    try:
+        ref = scoped.put("artifacts/x/volume.bin", b"0123456789")
+    finally:
+        current_folder.reset(token)
+
+    token = current_folder.set("bbbb")
+    try:
+        with pytest.raises(HTTPException) as refused:
+            scoped.get_range(ref, 0, 4)
+        assert refused.value.status_code == 404
+    finally:
+        current_folder.reset(token)
 
 
 # ── staging, and the run that proves it ─────────────────────────────────────

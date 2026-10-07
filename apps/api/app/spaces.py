@@ -113,6 +113,33 @@ class SpacesStorage:
         body = self._request("get_object", Bucket=self.bucket, Key=self._key(ref))["Body"]
         return body.read()
 
+    def get_range(self, ref: str, start: int, length: int) -> bytes:
+        """One byte range, over S3's own Range header.
+
+        This is the difference between serving an image plane for 256 KB and for
+        31 MB. The object does not have to be read to be addressed: S3 answers a
+        range request directly, so the cost is the range and not the object.
+        """
+        if length <= 0:
+            return b""
+        key = self._key(ref)
+        response = self._request(
+            "get_object",
+            Bucket=self.bucket,
+            Key=key,
+            Range=f"bytes={start}-{start + length - 1}",
+        )
+        data = response["Body"].read()
+        if len(data) != length:
+            raise HTTPException(
+                status.HTTP_416_RANGE_NOT_SATISFIABLE,
+                detail=(
+                    f"{key!r} returned {len(data)} bytes for the range asked for "
+                    f"({start}+{length}): the stored object looks truncated"
+                ),
+            )
+        return data
+
     def exists(self, ref: str) -> bool:
         try:
             key = self._key(ref)
