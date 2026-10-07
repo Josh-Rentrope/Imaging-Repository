@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://boneviewer.local/schemas/results.schema.json",
+  "title": "ResultEnvelope",
+  "description": "Everything the pipeline returns. Every result carries the exact model_version that produced it -- non-negotiable in a medical context, and impossible to backfill.",
+  "type": "object",
+  "required": ["schema_version", "result_id", "source_capture_id", "ops", "model_version", "scale", "artifacts"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "result_id": { "type": "string", "format": "uuid" },
+    "source_capture_id": { "type": "string", "format": "uuid" },
+
+    "ops": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" },
+      "description": "Operations that ran, in order. An open vocabulary: backends may implement names beyond the canonical set.",
+      "examples": [["rectify", "reconstruct", "segment", "measure"]]
+    },
+
+    "model_version": {
+      "type": "string",
+      "description": "Opaque registry key identifying the weights that produced this result.",
+      "examples": ["tsdf@0.1.0", "toothseg@2026-10-04+a3f1"]
+    },
+
+    "rectification": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "frames_in": { "type": "integer" },
+        "frames_kept": { "type": "integer" },
+        "depth_frames": { "type": "integer" },
+        "depth_aligned": { "type": "boolean" },
+        "extrinsics_source": {
+          "type": ["string", "null"],
+          "enum": ["measured", "assumed", "calibrated", null]
+        }
+      }
+    },
+
+    "geometry": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "voxel_size_mm": { "type": "number" },
+        "frames_used": { "type": "integer" },
+        "registration_residual_mm": { "type": "number" }
+      }
+    },
+
+    "scale": {
+      "type": "object",
+      "required": ["verified"],
+      "additionalProperties": false,
+      "properties": {
+        "verified": {
+          "type": "boolean",
+          "description": "When false, all measurements are in arbitrary units and the UI MUST disable measurement affordances. See Notes/04."
+        },
+        "source": {
+          "type": "string",
+          "enum": ["depth_sensor", "fiducial", "prior_scan", "unknown"]
+        },
+        "scale_error_pct": { "type": "number" }
+      }
+    },
+
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "format", "ref"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["mesh", "volume", "splat", "radiograph_overlay", "thumbnail", "report"]
+          },
+          "format": {
+            "type": "string",
+            "enum": ["stl", "ply", "obj", "vtk", "vti", "nii", "png", "json", "pdf"]
+          },
+          "ref": { "type": "string", "description": "Opaque storage reference." },
+          "bytes": { "type": "integer", "minimum": 0 },
+          "units": { "type": "string", "enum": ["mm", "arbitrary"] }
+        }
+      }
+    },
+
+    "segmentation": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "arch": { "type": "string", "enum": ["upper", "lower", "both"] },
+        "unassigned_region_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "The honest denominator. Surface the UI, don't bury it. See Notes/05."
+        },
+        "instances": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["instance_id"],
+            "additionalProperties": false,
+            "properties": {
+              "instance_id": { "type": "integer" },
+              "fdi": {
+                "type": ["integer", "null"],
+                "minimum": 11,
+                "maximum": 48,
+                "description": "ISO 3950. NULLABLE ON PURPOSE: an abstention is a usable output, a confident wrong label is a liability."
+              },
+              "fdi_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+              "centroid": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+              "crown_area_mm2": { "type": ["number", "null"] }
+            }
+          }
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["crowding", "restored", "missing_units", "appliance_present", "partial_edentulism"]
+          }
+        }
+      }
+    },
+
+    "measurements": {
+      "type": "array",
+      "description": "Empty whenever scale.verified is false.",
+      "items": {
+        "type": "object",
+        "required": ["name", "value", "unit"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "examples": ["arch_width_molar_mm", "overjet_mm", "bone_loss_pct"] },
+          "value": { "type": "number" },
+          "unit": { "type": "string", "enum": ["mm", "um", "pct", "deg"] },
+          "uncertainty": { "type": "number", "description": "Report the uncertainty, not just the value." },
+          "method": { "type": "string" }
+        }
+      }
+    },
+
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gate_passed": { "type": "boolean" },
+        "rejections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "insufficient_coverage",
+                  "excessive_specular",
+                  "motion_blur",
+                  "underexposed",
+                  "invalid_depth",
+                  "scale_unresolved"
+                ]
+              },
+              "detail": { "type": "string" },
+              "frame_ids": { "type": "array", "items": { "type": "integer" } }
+            }
+          }
+        }
+      }
+    },
+
+    "warnings": { "type": "array", "items": { "type": "string" } },
+
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend": { "type": "string", "enum": ["server", "ondevice", "fixture"] },
+        "tenant_ref": { "type": "string" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "duration_ms": { "type": "integer" }
+      }
+    }
+  }
+}
