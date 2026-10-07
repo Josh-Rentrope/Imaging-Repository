@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react'
 
 import { BackendStatus } from '../components/BackendStatus'
+import { SamplesModal } from '../editor/SamplesModal'
 import { WorkspaceManager } from '../editor/WorkspaceManager'
 import { useEditor } from '../state/editor'
 
@@ -13,9 +14,17 @@ import { useEditor } from '../state/editor'
  * stays a two-click operation with nothing destructive adjacent to it.
  */
 export function AppShell({ children }: { children: ReactNode }) {
-  const { workspaces, activeWorkspaceId, selectWorkspace, activeWorkspace, activeSet, selectSet } =
-    useEditor()
+  const {
+    workspaces,
+    activeWorkspaceId,
+    selectWorkspace,
+    activeWorkspace,
+    activeSet,
+    selectSet,
+    refreshSources,
+  } = useEditor()
   const [managerOpen, setManagerOpen] = useState(false)
+  const [samplesOpen, setSamplesOpen] = useState(false)
 
   return (
     <div className="app">
@@ -47,6 +56,12 @@ export function AppShell({ children }: { children: ReactNode }) {
           </button>
         </div>
 
+        <div className="header-group">
+          <button onClick={() => setSamplesOpen(true)} title="Add a sample dataset">
+            samples
+          </button>
+        </div>
+
         <span className="header-spacer" />
         <BackendStatus />
       </header>
@@ -54,6 +69,14 @@ export function AppShell({ children }: { children: ReactNode }) {
       {children}
 
       <WorkspaceManager open={managerOpen} onClose={() => setManagerOpen(false)} />
+
+      <SamplesModal
+        open={samplesOpen}
+        onClose={() => setSamplesOpen(false)}
+        workspaceId={activeWorkspace.id}
+        setId={activeSet.id}
+        onImported={() => void refreshSources()}
+      />
     </div>
   )
 }

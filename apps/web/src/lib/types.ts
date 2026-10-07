@@ -228,6 +228,59 @@ export interface SourceSummary {
   render_reason: string | null
 }
 
+/** A dataset the app can pull in from a URL. */
+export interface SampleEntry {
+  id: string
+  title: string
+  description: string
+  url: string
+  /** Shown beside the download, so the terms travel with the data. */
+  licence: string
+  size_mb: number | null
+  kind: string
+  notes: string | null
+  tags: string[]
+  /** False when this deployment has no bucket configured for it. */
+  available: boolean
+}
+
+export interface SamplesCatalogue {
+  configured: boolean
+  base: string | null
+  samples: SampleEntry[]
+}
+
+/** A source, plus where it came from when it was fetched rather than uploaded. */
+export interface ImportedSource extends SourceSummary {
+  imported_from?: string
+  file_count?: number
+}
+
+/** What a camera-pose solver will accept. A sequence is not an unordered set. */
+export type InputShape = 'unordered_images' | 'image_sequence' | 'device_poses'
+
+/** One framework that can work out where the camera was. */
+export interface SolverEntry {
+  name: string
+  tool: string
+  description: string
+  algorithm: string
+  accepts: InputShape[]
+  /** Carried because one of them is copyleft; see pipeline/solvers.py. */
+  licence: string
+  reference: string | null
+  notes: string | null
+  /** False when this deployment cannot run it — do not offer it. */
+  available: boolean
+  detail: string | null
+}
+
+export interface SolversResponse {
+  solvers: SolverEntry[]
+  available: string[]
+  shapes: { name: InputShape; description: string }[]
+}
+
 /** One entry in the Image View: a DICOM slice, or an uploaded photo. */
 export interface SourceImage {
   index: number

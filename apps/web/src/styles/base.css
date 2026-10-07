@@ -251,6 +251,28 @@ button, select, input {
   color: var(--fg-muted);
 }
 
+/* Frameworks the current data cannot use. Listed rather than hidden: an option
+   that is simply absent reads as a missing feature, and here the reason is
+   usually the shape of the capture rather than the deployment. */
+.solver-unavailable {
+  margin: 6px 0 0;
+  padding-left: 0;
+  list-style: none;
+}
+
+.solver-unavailable li {
+  margin-bottom: 2px;
+}
+
+.solver-licence {
+  margin-left: 5px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
 /* The mark takes the place of the paragraph it explains. Sized and coloured to
    read as an affordance rather than as content. */
 .hint {
@@ -769,6 +791,15 @@ select {
   gap: 8px;
   justify-content: space-between;
   margin-top: 4px;
+}
+
+/* A modal narrower than the workspace manager, which needs three columns. */
+.modal-narrow { width: 520px; }
+
+.modal-body.column {
+  display: block;
+  max-height: 70vh;
+  overflow-y: auto;
 }
 
 /* ── Label tree ──────────────────────────────────────────────────────────── */

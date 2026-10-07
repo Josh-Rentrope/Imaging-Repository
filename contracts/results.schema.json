@@ -130,6 +130,38 @@
         "triangles_before": {
           "type": "integer",
           "minimum": 0
+        },
+        "frames": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Frames the pose stage was given."
+        },
+        "pose_source": {
+          "type": "string",
+          "enum": [
+            "device",
+            "sfm",
+            "placeholder"
+          ],
+          "description": "Where the camera trajectory came from. `placeholder` means no solver ran and the geometry is not a trajectory."
+        },
+        "pose_solver": {
+          "type": "string",
+          "description": "Which framework produced the trajectory, when one did. Absent when the device supplied poses. See GET /solvers for the known names."
+        },
+        "poses_solved": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Poses solved here. Zero when the capture brought its own, or when nothing solved them."
+        },
+        "reprojection_residual_px": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Mean reprojection error the solver reported, in pixels. Absent when the solver does not report one."
+        },
+        "scale_known": {
+          "type": "boolean",
+          "description": "Whether the trajectory is metric. A solved one never is, which is why this is separate from scale.verified."
         }
       }
     },
@@ -270,9 +302,13 @@
                 "description": "ISO 3950. NULLABLE ON PURPOSE: an abstention is a usable output, a confident wrong label is a liability."
               },
               "fdi_confidence": {
-                "type": "number",
+                "type": [
+                  "number",
+                  "null"
+                ],
                 "minimum": 0,
-                "maximum": 1
+                "maximum": 1,
+                "description": "Null when no number was assigned, which is an abstention rather than a low-confidence guess. Same treatment as crown_area_mm2."
               },
               "centroid": {
                 "type": "array",
@@ -392,6 +428,15 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "coverage_pct": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Share of the intended capture volume the frames covered. Null when coverage was not measured, which is not the same as zero."
+        },
         "gate_passed": {
           "type": "boolean"
         },

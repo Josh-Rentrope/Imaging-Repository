@@ -6,6 +6,8 @@ import {
   DEFAULT_THRESHOLD,
   DEFAULT_WORKFLOW,
   PipelineSection,
+  shapeFor,
+  solverChoices,
   SURFACE_AFTER_MASK,
   workflowFor,
   type PipelineParams,
@@ -20,6 +22,7 @@ import {
   Op,
   type Job,
   type SegmenterClasses,
+  type SolverEntry,
   type SourceSummary,
   type VolumePayload,
 } from '../lib/types'
@@ -79,6 +82,7 @@ export default function EditorRoute() {
     stride: 1,
     simplify: DEFAULT_SIMPLIFY_MM,
     labels: null,
+    solver: null,
   })
   const [workflow, setWorkflow] = useState('ct')
   const [hasDepth, setHasDepth] = useState(false)
@@ -92,6 +96,7 @@ export default function EditorRoute() {
   // flight at once, and each row tracks its own.
   const [inFlight, setInFlight] = useState<string[]>([])
   const [segmenter, setSegmenter] = useState<SegmenterClasses | null>(null)
+  const [solvers, setSolvers] = useState<SolverEntry[]>([])
   // Held while a submission is in flight, so Run cannot be pressed twice for
   // one job. The backend answers as soon as it has accepted the job.
   const [submitting, setSubmitting] = useState(false)
@@ -185,6 +190,47 @@ export default function EditorRoute() {
       cancelled = true
     }
   }, [activeSource?.kind])
+
+  // Fetched once per mount rather than per source: what is installed is a
+  // property of the deployment, not of the data, so it cannot change by
+  // switching sources and re-asking would only add a request per click.
+  useEffect(() => {
+    let cancelled = false
+    api
+      .listSolvers()
+      .then((found) => {
+        if (!cancelled) setSolvers(found.solvers)
+      })
+      .catch(() => {
+        // A deployment that cannot answer this offers no choice, which is the
+        // same state as one that has nothing installed.
+        if (!cancelled) setSolvers([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const shape = shapeFor(activeSource?.kind ?? 'images', hasDepth)
+
+  /**
+   * Drop a chosen solver the current source cannot support.
+   *
+   * The choice is made against one set of photographs and outlives them: a
+   * sequence solver picked for a capture with depth is not valid for a folder
+   * of stills, and the backend would refuse the job after the upload. Cleared on
+   * the way in instead. Guarded on the list being loaded, or the empty list
+   * before the fetch resolves would clear a perfectly good choice.
+   */
+  useEffect(() => {
+    if (params.solver === null || solvers.length === 0) return
+    const usable = solverChoices(solvers, shape)
+      .filter((choice) => choice.offered)
+      .map((choice) => choice.entry.name)
+    if (!usable.includes(params.solver)) {
+      setParams((current) => ({ ...current, solver: null }))
+    }
+  }, [solvers, shape, params.solver])
 
   // Falls back to names from a run, which is what remains if the info companion
   // is missing — the segmenter can still find structures, it just cannot name
@@ -473,6 +519,8 @@ export default function EditorRoute() {
           workflow={workflow}
           onWorkflowChange={setWorkflow}
           selected={selectedOps}
+          solvers={solvers}
+          shape={shape}
           onToggle={(op) =>
             setSelectedOps((current) => {
               if (current.includes(op)) return current.filter((o) => o !== op)

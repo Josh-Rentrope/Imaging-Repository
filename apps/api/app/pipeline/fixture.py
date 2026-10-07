@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from ..sources import SourceStore
 from ..storage import LocalStorage
+from . import solvers, totalseg
 from .interfaces import (
     BackendId,
     Capabilities,
@@ -32,7 +34,6 @@ from .interfaces import (
     Op,
     OpNotSupported,
 )
-from . import totalseg
 from .isosurface import SurfaceError, extract, extract_labelled
 from .meshgen import build_dental_arch, to_ply
 from .ply import write_ply
@@ -395,31 +396,75 @@ def _estimate_poses(envelope: dict, params: dict, context: dict) -> None:
     without them are solved for. The capture says which by whether it carries
     poses already, so a phone never pays for structure-from-motion it does not
     need — and a set of ordinary photos is not refused for lacking a tracker.
+
+    A capture that brought its own poses is never re-solved. A capture that did
+    not is solved by whichever framework was asked for, or by whichever is
+    installed when none was named — and the answer records which one ran, so two
+    runs of the same photographs through different frameworks are comparable
+    rather than merely different.
     """
     capture = context["capture"]
     frames = capture.get("frames") or []
     supplied = [frame for frame in frames if frame.get("pose")]
 
-    if supplied:
-        source, solved = "device", 0
-    else:
-        source, solved = "sfm", len(frames)
+    requested = params.get("solver")
+    if isinstance(requested, str) and not requested.strip():
+        requested = None
 
-    envelope["geometry"] = {
+    solver = solvers.resolve(requested, frames)
+
+    geometry: dict[str, Any] = {
         **(envelope.get("geometry") or {}),
-        "pose_source": source,
+        "pose_source": "device" if supplied else "sfm",
         "frames": len(frames),
-        "poses_solved": solved,
+        "poses_solved": 0 if supplied else len(frames),
         # Nothing here is metric: a solved camera trajectory has scale only up to
         # an unknown factor, which is why a fiducial or a depth sensor matters.
         "scale_known": bool(supplied),
     }
-    envelope["warnings"].append(
-        "Camera poses came from the device tracker."
-        if supplied
-        else "Camera poses were solved from the photographs alone, so the scene "
-        "has no metric scale until a fiducial fixes it."
-    )
+
+    if supplied:
+        envelope["warnings"].append("Camera poses came from the device tracker.")
+    elif solver is None:
+        # No framework is installed here, so no poses were solved and the
+        # geometry below is the fixture's placeholder. Said out loud, because a
+        # result that claims `poses_solved: N` without one is the kind of number
+        # that gets quoted later.
+        geometry["pose_source"] = "placeholder"
+        geometry["poses_solved"] = 0
+        envelope["warnings"].append(
+            "No camera-pose solver is installed in this deployment, so no poses were "
+            "solved and the geometry is a placeholder. Register one (COLMAP, ORB-SLAM2, "
+            "openMVG and hloc are all known to the pipeline) or supply poses with the "
+            "capture."
+        )
+    else:
+        outcome = _run_solver(solver, frames, params)
+        geometry["pose_solver"] = solver
+        geometry["pose_source"] = "sfm"
+        geometry["poses_solved"] = len(outcome.poses)
+        geometry["scale_known"] = outcome.scale_known
+        if outcome.residual_px is not None:
+            geometry["reprojection_residual_px"] = outcome.residual_px
+        envelope["warnings"].extend(outcome.warnings)
+
+    envelope["geometry"] = geometry
+
+    # The stage record carries the framework, so a manifest says which one
+    # produced the trajectory instead of only that poses were estimated.
+    record = envelope["provenance"]["stages"][-1]
+    info = solvers.CATALOGUE.get(solver) if solver else None
+    if info is not None:
+        record["tool"] = info.tool
+        record["algorithm"] = info.algorithm
+        record["licence"] = info.licence
+
+
+def _run_solver(name: str, frames: list[dict[str, Any]], params: dict) -> Any:
+    solver = solvers.get(name)
+    if solver is None:  # resolve() already refused this; belt and braces
+        raise solvers.SolverUnavailable(f"{name} is not installed in this deployment")
+    return solver.solve(frames, params)
 
 
 def _px2tooth(envelope: dict, params: dict, context: dict) -> None:

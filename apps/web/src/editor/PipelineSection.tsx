@@ -1,4 +1,4 @@
-import { Op, type Stage } from '../lib/types'
+import { Op, type InputShape, type SolverEntry, type Stage } from '../lib/types'
 import { Info } from './Info'
 import { LabelTree } from './LabelTree'
 
@@ -95,7 +95,18 @@ export interface PipelineParams {
    * silently ask for everything.
    */
   labels: string[] | null
+  /**
+   * Which framework solves the camera poses.
+   *
+   * `null` is "whichever is installed", which is the right default and the only
+   * choice available when none are. Naming one is how two frameworks get
+   * compared on the same photographs — each export records which ran.
+   */
+  solver: string | null
 }
+
+/** Ticked automatically with the workflow; nothing here forces it. */
+export const SOLVER_OP = Op.ESTIMATE_POSES
 
 /** Every structure, as the backend spells it. */
 export const ALL_LABELS = 'all'
@@ -121,6 +132,12 @@ export function buildStages(
   const sequence = [...selected].sort((a, b) => ordered.indexOf(a) - ordered.indexOf(b))
 
   return sequence.map((op) => {
+    if (op === Op.ESTIMATE_POSES) {
+      // Omitted rather than sent as null when nothing was named: an absent
+      // parameter means "whichever is installed", and the backend treats an
+      // empty string the same way, so there is one spelling of that intent.
+      return params.solver ? { op, params: { solver: params.solver } } : { op }
+    }
     if (op !== Op.ISO_SURFACE) return { op }
     // The threshold is meaningless once a mask is driving the surface, and a
     // label is meaningless without one, so neither is sent in the wrong case.
@@ -130,6 +147,54 @@ export function buildStages(
       ? { op, params: { label: params.labels ?? ALL_LABELS, ...shared } }
       : { op, params: { threshold: params.threshold, ...shared } }
   })
+}
+
+/**
+ * Which frameworks the form may offer, given what the capture actually is.
+ *
+ * The shape is not a preference — it is a property of the data. A folder of
+ * stills has no order for a SLAM tracker to follow, and offering ORB-SLAM2 for
+ * it would let someone pick a solver that cannot answer. So the list is filtered
+ * by shape as well as by what is installed, and the reason is shown rather than
+ * the entry being silently absent.
+ */
+export function solverChoices(
+  solvers: SolverEntry[],
+  shape: InputShape,
+): { entry: SolverEntry; offered: boolean; why: string | null }[] {
+  return solvers
+    .filter((entry) => entry.name !== 'device')
+    .map((entry) => {
+      if (!entry.accepts.includes(shape)) {
+        return {
+          entry,
+          offered: false,
+          why: `takes ${entry.accepts.map(shapeLabel).join(' or ')}, not ${shapeLabel(shape)}`,
+        }
+      }
+      if (!entry.available) {
+        return { entry, offered: false, why: entry.detail ?? 'not available here' }
+      }
+      return { entry, offered: true, why: null }
+    })
+}
+
+export function shapeLabel(shape: string): string {
+  switch (shape) {
+    case 'unordered_images':
+      return 'an unordered set'
+    case 'image_sequence':
+      return 'a sequence'
+    case 'device_poses':
+      return 'device poses'
+    default:
+      return shape
+  }
+}
+
+/** The shape a source presents, as far as the form can tell. */
+export function shapeFor(kind: 'dicom' | 'images', hasDepth: boolean): InputShape {
+  return kind === 'images' && hasDepth ? 'image_sequence' : 'unordered_images'
 }
 
 export function PipelineSection({
@@ -142,6 +207,8 @@ export function PipelineSection({
   onParamsChange,
   valueRange,
   knownLabels,
+  solvers,
+  shape,
   onRun,
   canRun,
   running,
@@ -157,6 +224,10 @@ export function PipelineSection({
   valueRange: [number, number] | null
   /** Class names from a previous segmentation of this source, if any. */
   knownLabels: string[]
+  /** Camera-pose frameworks this deployment knows about. Empty until fetched. */
+  solvers: SolverEntry[]
+  /** What this source presents, which decides which solvers are usable. */
+  shape: InputShape
   onRun: () => void
   canRun: boolean
   /** Jobs submitted and not yet finished. Shown, not gating. */
@@ -166,6 +237,13 @@ export function PipelineSection({
 }) {
   const wantsSurface = selected.includes(Op.ISO_SURFACE)
   const wantsMask = selected.includes(Op.SEGMENT)
+  const wantsPoses = selected.includes(SOLVER_OP)
+  const choices = solverChoices(solvers, shape)
+  const usable = choices.filter((choice) => choice.offered)
+  // A named solver the capture cannot support is worse than no choice at all:
+  // the job fails at the backend with the reason, after the upload. Cleared here
+  // so the selection cannot outlive the data it was made for.
+  const stale = params.solver !== null && !usable.some((c) => c.entry.name === params.solver)
   const extracting = params.labels === null ? knownLabels.length : params.labels.length
   // Nothing ticked is a job that would extract nothing. The button says so
   // rather than letting the backend answer with an error.
@@ -310,6 +388,74 @@ export function PipelineSection({
               ? `Collapses detail finer than ${params.simplify} mm. `
               : ''}
           </p>
+        </div>
+      )}
+
+      {wantsPoses && (
+        <div
+          className="plane-block"
+          style={{ marginTop: 8, paddingTop: 6, borderTop: '1px solid var(--border)' }}
+        >
+          <label className="field" style={{ marginBottom: 4 }}>
+            <span className="field-label">camera poses</span>
+            <select
+              value={stale ? '' : (params.solver ?? '')}
+              onChange={(event) =>
+                onParamsChange({ ...params, solver: event.target.value || null })
+              }
+            >
+              <option value="">
+                {usable.length > 0 ? 'whichever is installed' : 'none available'}
+              </option>
+              {usable.map(({ entry }) => (
+                <option key={entry.name} value={entry.name}>
+                  {entry.tool}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {usable.length === 0 ? (
+            <p className="popover-hint warn-text" style={{ margin: '2px 0 0' }}>
+              No solver is installed here, so poses will not be solved and the geometry is a
+              placeholder.
+              <Info
+                text={
+                  'A capture that carries its own camera positions — a phone that tracked its own ' +
+                  'motion — does not need any of these and is never re-solved. These are for ' +
+                  'photographs that do not.'
+                }
+              />
+            </p>
+          ) : (
+            <p className="popover-hint" style={{ margin: '2px 0 0' }}>
+              {params.solver
+                ? (solvers.find((s) => s.name === params.solver)?.algorithm ?? '')
+                : 'Photographs are solved by whichever framework is installed.'}
+              <Info
+                text={
+                  'Which framework ran is recorded on the result, so the same photographs put ' +
+                  'through two of them can be compared rather than merely differing.'
+                }
+              />
+            </p>
+          )}
+
+          {/* The ones it cannot offer, and why, rather than quietly omitting
+              them — an absent option reads as a missing feature, and here the
+              reason is usually the data rather than the deployment. */}
+          {choices.filter((choice) => !choice.offered).length > 0 && (
+            <ul className="solver-unavailable">
+              {choices
+                .filter((choice) => !choice.offered)
+                .map(({ entry, why }) => (
+                  <li key={entry.name} className="popover-hint">
+                    <span className="mono">{entry.tool}</span> — {why}
+                    <span className="solver-licence">{entry.licence}</span>
+                  </li>
+                ))}
+            </ul>
+          )}
         </div>
       )}
 

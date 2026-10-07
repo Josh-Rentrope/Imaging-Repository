@@ -12,6 +12,9 @@ import type {
   Job,
   JobCreate,
   SegmenterClasses,
+  ImportedSource,
+  SamplesCatalogue,
+  SolversResponse,
   SourceImages,
   SourceSummary,
   VolumePayload,
@@ -99,6 +102,30 @@ export const api = {
   /** What a segmenter can find. Answered without running it. */
   segmenterClasses: (task = 'total') =>
     request<SegmenterClasses>(`/segmenter/classes?task=${encodeURIComponent(task)}`),
+
+  /** Datasets this deployment offers to pull in. */
+  listSamples: () => request<SamplesCatalogue>('/samples'),
+
+  /** Camera-pose solvers, and which of them can actually run here. */
+  listSolvers: () => request<SolversResponse>('/solvers'),
+
+  /**
+   * Download a dataset from a URL and add it as a source.
+   *
+   * The server does the fetching and unpacking, so this is one request rather
+   * than a download-and-reupload from the browser.
+   */
+  importRemote: (body: {
+    url: string
+    workspace_id: string
+    set_id: string
+    name?: string
+  }) =>
+    request<ImportedSource>('/sources/remote', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
 
   /** What the Image View can show for a source. */
   listImages: (sourceId: string) => request<SourceImages>(`/sources/${sourceId}/images`),

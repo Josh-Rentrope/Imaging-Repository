@@ -24,64 +24,16 @@ from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
 from app.dicom import parse_file
 from app.main import create_app
 
-RGBD_CAPTURE = {
-    "capture_id": "11111111-1111-1111-1111-111111111111",
-    "modality": "rgbd",
-    "depth": [{"frame_id": 0, "depth_ref": "depth/0.bin", "scale_factor": 0.001}],
-}
-
-RGB_NO_FIDUCIAL = {
-    "capture_id": "22222222-2222-2222-2222-222222222222",
-    "modality": "rgb",
-}
-
-FULL_PIPELINE = [
-    {"op": "rectify"},
-    {"op": "reconstruct"},
-    {"op": "segment"},
-    {"op": "measure"},
-]
-
-
-@pytest.fixture()
-def client(tmp_path, monkeypatch):
-    monkeypatch.setenv("BONE_VIEWER_DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("BONE_VIEWER_RECORDINGS_DIR", str(tmp_path / "recordings"))
-    monkeypatch.delenv("BONE_VIEWER_ENABLE_DIAGNOSTIC", raising=False)
-    from app.config import get_settings
-
-    get_settings.cache_clear()
-    with TestClient(create_app()) as test_client:
-        yield test_client
-    get_settings.cache_clear()
-
+from helpers import (  # noqa: E402  (tests/ is on sys.path under pytest)
+    FULL_PIPELINE,
+    RGB_NO_FIDUCIAL,
+    RGBD_CAPTURE,
+    run,
+    settle,
+    submit,
+)
 
 # ── pipeline ────────────────────────────────────────────────────────────────
-
-
-def settle(client: TestClient, job: dict, timeout: float = 60.0) -> dict:
-    """Poll a job until it stops being queued or running.
-
-    Submission returns as soon as the job is accepted — the work happens on a
-    thread — so every assertion about an outcome has to wait for it.
-    """
-    deadline = time.monotonic() + timeout
-    while job["status"] in ("queued", "running"):
-        assert time.monotonic() < deadline, f"job never finished: {job}"
-        time.sleep(0.02)
-        job = client.get(f"/jobs/{job['job_id']}").json()
-    return job
-
-
-def submit(client: TestClient, stages: list[dict], capture: dict | None = None, **extra) -> dict:
-    response = client.post("/jobs", json={"stages": stages, "capture": capture, **extra})
-    assert response.status_code == 201, response.text
-    return response.json()
-
-
-def run(client: TestClient, stages: list[dict], capture: dict | None = None, **extra) -> dict:
-    return settle(client, submit(client, stages, capture, **extra))
-
 
 def test_a_finished_job_outlives_the_process_that_ran_it(tmp_path, monkeypatch):
     """The record is on disk, so a reload does not cost the run.
@@ -1089,11 +1041,19 @@ def test_poses_come_from_the_device_when_it_has_them(client):
 
 
 def test_poses_are_solved_when_the_capture_has_none(client):
-    """Ordinary photographs are not refused for lacking a tracker."""
+    """Ordinary photographs are not refused for lacking a tracker.
+
+    What they get is not a trajectory, though. Nothing in this checkout can
+    solve one, so the result says `placeholder` and warns — see
+    test_photos_with_no_solver_say_placeholder_rather_than_claiming_a_solve.
+    The earlier version of this test asserted `sfm` and `poses_solved: N`,
+    which was the fixture describing work no solver had done.
+    """
     result = run(client, [{"op": "estimate_poses"}], RGB_NO_FIDUCIAL)["result"]
-    assert result["geometry"]["pose_source"] == "sfm"
+    assert result["geometry"]["pose_source"] == "placeholder"
+    assert result["geometry"]["poses_solved"] == 0
     assert result["geometry"]["scale_known"] is False
-    assert any("no metric scale" in w for w in result["warnings"])
+    assert any("No camera-pose solver is installed" in w for w in result["warnings"])
 
 
 def test_any_number_of_views_is_accepted(client):
@@ -1325,3 +1285,209 @@ def test_every_stage_describes_itself(client):
         assert entry is not None, f"{op} has no implementation record"
         assert entry.get("description"), f"{op} has no description"
         assert entry["description"].endswith("."), f"{op}'s description is not a sentence"
+
+
+# ── importing from a URL ───────────────────────────────────────────────────
+#
+# The endpoint takes a string from a user and makes the server act on it, so
+# these test the attacks rather than the happy path. A regression here is not a
+# broken feature, it is a hole.
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1/anything",          # the server itself
+        "http://localhost/anything",          # the same, by name
+        "http://169.254.169.254/latest/meta-data/",  # cloud instance metadata
+        "http://10.1.2.3/x",                  # private network
+        "http://192.168.0.1/x",
+        "http://[::1]/x",                     # loopback, v6
+        "http://0.0.0.0/x",
+        "file:///etc/passwd",                 # the server's own disk
+        "ftp://example.com/x",
+        "gopher://example.com/x",
+    ],
+)
+def test_internal_addresses_are_refused(url):
+    """A URL is an instruction, not a location.
+
+    Left alone, the server fetches these with its own credentials and its own
+    network position, and the caller learns the answers.
+    """
+    from app.fetch import RemoteError, download
+
+    with pytest.raises(RemoteError):
+        download(url)
+
+
+def test_a_public_host_that_resolves_inward_is_refused(monkeypatch):
+    """One public record must not launder a private one.
+
+    A name with both is the standard way past a check that only looks at the
+    first answer.
+    """
+    from app import fetch
+
+    monkeypatch.setattr(
+        fetch.socket,
+        "getaddrinfo",
+        lambda *a, **k: [
+            (2, 1, 6, "", ("93.184.216.34", 0)),
+            (2, 1, 6, "", ("127.0.0.1", 0)),
+        ],
+    )
+    with pytest.raises(fetch.RemoteError, match="not a public address"):
+        fetch.download("http://looks-fine.example/x")
+
+
+def test_archive_paths_cannot_escape_their_folder(tmp_path):
+    """`../../` in an entry name writes wherever the extractor is allowed to."""
+    from app.fetch import RemoteError, _extract_zip
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("../../etc/passwd", "root:x:0:0")
+        archive.writestr("normal/slice.dcm", "fine")
+
+    with pytest.raises(RemoteError):
+        _extract_zip(buffer.getvalue())
+
+
+def test_absolute_paths_are_refused():
+    from app.fetch import RemoteError, _extract_zip
+
+    for name in ("/etc/shadow", r"C:\Windows\system.ini", r"\\server\share\x"):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr(name, "x")
+        with pytest.raises(RemoteError):
+            _extract_zip(buffer.getvalue())
+
+
+def test_a_decompression_bomb_is_refused():
+    """42 KB of zeros expands to gigabytes. The ratio is the tell."""
+    from app.fetch import RemoteError, _extract_zip
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("bomb.bin", b"\0" * (80 * 1024 * 1024))
+
+    blob = buffer.getvalue()
+    assert len(blob) < 200_000, "the test's own premise: the archive is small"
+    with pytest.raises(RemoteError, match="decompression bomb"):
+        _extract_zip(blob)
+
+
+def test_a_symlink_in_a_zip_is_refused():
+    """Stored as a member whose content is the target, and followed on write."""
+    from app.fetch import RemoteError, _extract_zip
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        info = zipfile.ZipInfo("link")
+        # 0o120000 is S_IFLNK in the high bits of the external attributes.
+        info.external_attr = 0o120777 << 16
+        archive.writestr(info, "/etc/passwd")
+
+    with pytest.raises(RemoteError, match="symbolic link"):
+        _extract_zip(buffer.getvalue())
+
+
+def test_a_symlink_in_a_tar_is_refused(tmp_path):
+    """`filter="data"` would strip it; refusing loudly is better than silently
+    dropping a file the archive's author meant to be there."""
+    import tarfile
+
+    from app.fetch import RemoteError, _extract_tar
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        info = tarfile.TarInfo("escape")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        archive.addfile(info)
+
+    with pytest.raises(RemoteError, match="link or device"):
+        _extract_tar(buffer.getvalue())
+
+
+def test_a_normal_archive_is_detected_by_its_contents_not_its_name():
+    """The name is a claim; the magic bytes are a fact."""
+    from app.fetch import _looks_like_archive
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("a.dcm", "x")
+    assert _looks_like_archive(buffer.getvalue()) == "zip"
+
+    # A JPEG is not an archive, whatever it is called.
+    assert _looks_like_archive(b"\xff\xd8\xff\xe0" + b"rest") is None
+
+
+def test_a_rar_says_what_is_missing_rather_than_failing_obscurely():
+    from app.fetch import RemoteError, fetch_dataset
+
+    blob = b"Rar!\x1a\x07\x00" + b"\0" * 64
+    monkey = __import__("app.fetch", fromlist=["download"])
+    original = monkey.download
+    monkey.download = lambda url: blob
+    try:
+        with pytest.raises(RemoteError, match="unrar"):
+            fetch_dataset("http://example.com/x.rar")
+    finally:
+        monkey.download = original
+
+
+def test_the_samples_catalogue_is_honest_about_being_empty(client):
+    """Better an empty catalogue than one that offers a button which 404s."""
+    body = client.get("/samples").json()
+    assert body["configured"] is False
+    assert body["samples"] == []
+
+
+def test_importing_from_a_url_adds_a_normal_source(client, monkeypatch):
+    """The end result is an ordinary source: nothing downstream special-cases it."""
+    from app import fetch
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("photo-1.jpg", b"\xff\xd8\xff\xe0" + b"a" * 32)
+        archive.writestr("nested/photo-2.jpg", b"\xff\xd8\xff\xe0" + b"b" * 32)
+
+    monkeypatch.setattr(fetch, "download", lambda url: buffer.getvalue())
+
+    response = client.post(
+        "/sources/remote",
+        json={
+            "url": "https://example.com/demo-set.tar.gz",
+            "workspace_id": "ws-1",
+            "set_id": "set-1",
+            "name": "Demo set",
+        },
+    )
+    assert response.status_code == 201, response.text
+    created = response.json()
+
+    assert created["kind"] == "images"
+    assert created["name"] == "Demo set"
+    assert created["imported_from"] == "https://example.com/demo-set.tar.gz"
+    assert created["file_count"] == 2
+
+    listed = client.get("/sources?workspace_id=ws-1&set_id=set-1").json()
+    assert [entry["source_id"] for entry in listed] == [created["source_id"]]
+
+
+def test_a_refused_url_is_a_client_error_with_a_reason(client, monkeypatch):
+    from app import fetch
+
+    def refuse(url):
+        raise fetch.RemoteError("that address is not public")
+
+    monkeypatch.setattr(fetch, "download", refuse)
+    response = client.post(
+        "/sources/remote",
+        json={"url": "http://10.0.0.1/x", "workspace_id": "w", "set_id": "s"},
+    )
+    assert response.status_code == 400
+    assert "not public" in response.json()["detail"]

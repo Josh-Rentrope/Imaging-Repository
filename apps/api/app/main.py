@@ -14,7 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import get_settings
 from .jobs import JobStore
 from .pipeline import BackendRegistry
-from .routers import artifacts, exports, health, jobs, segmenter, sources
+from .pipeline import solvers as solver_registry
+from .routers import artifacts, exports, health, jobs, samples, segmenter, solvers, sources
 from .sources import SourceStore
 from .storage import LocalStorage
 
@@ -22,6 +23,9 @@ from .storage import LocalStorage
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    # Discover camera-pose solvers published by the core distribution. Absent is
+    # the normal case for a checkout of this repo, and is not an error.
+    solver_registry.load_registered()
     app.state.settings = settings
     app.state.storage = LocalStorage(settings.data_dir)
     # The source store comes first: the pipeline reads volumes out of it.
@@ -62,6 +66,8 @@ def create_app() -> FastAPI:
     app.include_router(sources.router)
     app.include_router(artifacts.router)
     app.include_router(exports.router)
+    app.include_router(samples.router)
+    app.include_router(solvers.router)
 
     return app
 
