@@ -308,8 +308,14 @@ def _read(mask_path: Path, out_dir: Path, task: str = "total") -> Segmentation:
     # Unit direction cosines: the affine's columns with the spacing divided out.
     # A negative entry is a flip, and it has to survive into the header or the
     # mask is placed by its translation alone.
+    #
+    # Transposed on the way in, because `direction` is defined as the three axis
+    # vectors concatenated — the columns of this rotation — while `linear` has
+    # them as its columns already and `reshape` reads the other way. Storing
+    # `linear` un-transposed round-trips to the same basis either way when the
+    # rotation is diagonal; it does not when it is not.
     safe = np.array([s if s else 1.0 for s in spacing])
-    direction = tuple(float(v) for v in (linear / safe).reshape(-1))
+    direction = tuple(float(v) for v in (linear / safe).T.reshape(-1))
 
     # The task's own class list: `teeth` and `total` number their labels
     # differently, so asking for the wrong one renames every structure.

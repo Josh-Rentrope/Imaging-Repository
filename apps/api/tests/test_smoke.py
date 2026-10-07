@@ -1974,3 +1974,68 @@ def test_a_dicom_segment_envelope_matches_the_contract(client, monkeypatch):
         f"{'/'.join(str(p) for p in e.path)}: {e.message}" for e in errors
     )
     assert job["result"]["geometry"]["mask_placement"] is not None
+
+
+# ── what `direction` means, and why it has to mean one thing ───────────────
+
+
+def test_direction_is_read_as_axis_vectors_not_as_a_matrix():
+    """The nine numbers are the x, y and z axis directions concatenated.
+
+    Settled with an off-diagonal rotation on purpose. Every series in the sample
+    catalogue is axis-aligned, so reading `direction` as rows and reading it as
+    columns give the same answer — which is how the two conventions coexisted
+    while vtk.js used one and this did the other. A 90-degree rotation is the
+    smallest case where they disagree, so it is the one that pins it.
+    """
+    from app.pipeline.isosurface import world_transform
+
+    # x axis -> +y, y axis -> -x, z axis -> +z.
+    header = {
+        "spacing": [1.0, 2.0, 3.0],
+        "origin": [10.0, 20.0, 30.0],
+        "direction": [0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+    }
+    basis, origin = world_transform(header)
+
+    def world(index):
+        return basis @ np.array(index, dtype=float) + origin
+
+    # One step along index x moves one voxel at 1 mm along the x axis vector,
+    # which points at +y.
+    assert np.allclose(world([1, 0, 0]), [10.0, 21.0, 30.0])
+    # One step along index y moves at 2 mm along the y axis vector, which is -x.
+    assert np.allclose(world([0, 1, 0]), [8.0, 20.0, 30.0])
+    # Index origin is the origin.
+    assert np.allclose(world([0, 0, 0]), [10.0, 20.0, 30.0])
+
+
+def test_a_flipped_direction_is_not_the_same_as_the_identity():
+    """The Pancreas-CT case, in one assertion.
+
+    Its series is stored with rows running the other way and its slices running
+    the other way: direction diag(1, -1, -1), which the catalogue's other CTs do
+    not have. Rendering it as though direction were the identity draws it
+    mirrored — the study is not wrong, the renderer was.
+    """
+    from app.pipeline.isosurface import world_bounds
+
+    flipped = {
+        "dims": [2, 2, 3],
+        "spacing": [1.0, 1.0, 1.0],
+        "origin": [0.0, 0.0, 0.0],
+        "direction": [1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, -1.0],
+    }
+    plain = {**flipped, "direction": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]}
+
+    low, high = world_bounds(flipped)
+    # y and z run the other way from the same origin.
+    assert list(low) == [0.0, -1.0, -2.0]
+    assert list(high) == [1.0, 0.0, 0.0]
+
+    # Which is the same *box* as the unflipped one, and that is the point:
+    # a bounding box cannot tell these apart, so a mirrored volume and a correct
+    # one are indistinguishable by containment. The direction is what differs,
+    # and it has to be honoured rather than inferred.
+    assert list(world_bounds(plain)[0]) == [0.0, 0.0, 0.0]
+    assert list(world_bounds(plain)[1]) == [1.0, 1.0, 2.0]

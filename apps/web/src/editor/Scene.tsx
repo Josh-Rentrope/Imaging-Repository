@@ -23,6 +23,7 @@ import vtkSTLReader from '@kitware/vtk.js/IO/Geometry/STLReader'
 import vtkGenericRenderWindow from '@kitware/vtk.js/Rendering/Misc/GenericRenderWindow'
 
 import { artifactUrl, fetchArtifact } from '../lib/api'
+import type { VolumeHeader } from '../lib/types'
 import { intersectBox, intersectMesh, type Ray, type Visibility } from './raycast'
 import {
   AXIS_COLORS,
@@ -75,15 +76,11 @@ interface VertexLabels {
   counts: Record<string, number>
 }
 
-interface VolumeHeader {
-  dims: [number, number, number]
-  spacing: [number, number, number]
-  origin: [number, number, number]
-  byte_length: number
-  value_range: [number, number]
-  window_center: number | null
-  window_width: number | null
-}
+// `VolumeHeader` is imported rather than redeclared. It used to live here as a
+// second copy, which is how this file kept rendering without `direction` while
+// the shared type had it: the duplicate silently disagreed with the one the
+// rest of the app uses, and TypeScript was happy because it was checking the
+// copy.
 
 type Bounds = [number, number, number, number, number, number]
 
@@ -710,6 +707,14 @@ export function Scene({
       imageData.setDimensions(header.dims)
       imageData.setSpacing(header.spacing)
       imageData.setOrigin(header.origin)
+      // Without this the volume is drawn as if every series ran the same way.
+      // They do not: a study stored with its rows or slices reversed carries a
+      // -1 in its direction, and ignoring it draws that study mirrored while the
+      // surfaces extracted from the same data — which do honour it — sit in the
+      // right place. vtk.js reads these nine numbers as the x, y and z axis
+      // vectors and folds them into the image's index-to-world matrix, which is
+      // the same convention the backend writes them in.
+      imageData.setDirection(header.direction)
 
       const scalars = vtkDataArray.newInstance({
         name: 'scalars',

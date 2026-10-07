@@ -36,7 +36,12 @@ class Volume:
     array: np.ndarray  # (nz, ny, nx), x fastest when flattened
     spacing: tuple[float, float, float]  # mm, (sx, sy, sz)
     origin: tuple[float, float, float]
-    direction: tuple[float, ...]  # 9 values, row-major
+    #: The three voxel-axis directions concatenated — x, then y, then z — each a
+    #: unit direction cosine. They are the *columns* of the index-to-world
+    #: rotation, which is how vtk.js reads them and how `world_transform` does.
+    #: Calling this "row-major" is what made the renderer and the surface
+    #: extractor disagree about the same nine numbers.
+    direction: tuple[float, ...]
     window_center: float | None
     window_width: float | None
     stride: int = 1

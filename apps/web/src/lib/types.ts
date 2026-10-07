@@ -345,10 +345,23 @@ export interface VolumeHeader {
   dims: [number, number, number]
   spacing: [number, number, number]
   origin: [number, number, number]
+  /**
+   * The three voxel-axis directions in patient space, concatenated: the x, y
+   * and z axis vectors in that order, as unit cosines.
+   *
+   * Not decoration, and not optional in practice. A series stored with its rows
+   * or slices running the other way — which plenty of real exports are — has a
+   * direction with a −1 in it, and a renderer that ignores this draws that study
+   * mirrored relative to the anatomy. It was ignored here, which is why one
+   * sample looked upside down next to the others.
+   */
+  direction: [number, number, number, number, number, number, number, number, number]
   byte_length: number
   value_range: [number, number]
   window_center: number | null
   window_width: number | null
+  /** Voxel subsampling applied when the volume was assembled, if any. */
+  stride?: number
 }
 
 export interface VolumePayload {

@@ -29,9 +29,21 @@ def world_transform(
 ) -> tuple[np.ndarray, np.ndarray]:
     """The 3x3 basis and translation taking array index (x, y, z) to world.
 
-    `direction` is the header's own rotation, row-major, as unit direction
-    cosines — the affine's columns scaled out. It defaults to the identity, so a
-    header that predates it still resolves to plain spacing.
+    **`direction` is read as axis vectors, not as a row-major matrix.** The nine
+    numbers are the x, y and z voxel-axis directions concatenated, each a unit
+    direction cosine — so they are the *columns* of the rotation, which is how
+    the volume assembly writes them and how vtk.js reads them back into an
+    image's index-to-world matrix.
+
+    It used to be read as row-major here, which is the transpose. The two agree
+    for every axis-aligned series — all of them, in practice, which is exactly
+    why it survived — and disagree for an oblique acquisition, where the same
+    field would then mean one thing to the volume renderer and another to the
+    surface extractor. One field, one meaning; there is a test with a real
+    rotation holding it.
+
+    It defaults to the identity, so a header that predates direction still
+    resolves to plain spacing.
     """
     spacing = np.array([float(v) for v in header["spacing"]], dtype=np.float64)
     origin = np.array(
@@ -42,8 +54,8 @@ def world_transform(
     if raw is None:
         return np.diag(spacing), origin
 
-    rotation = np.array([float(v) for v in raw], dtype=np.float64).reshape(3, 3)
-    return rotation @ np.diag(spacing), origin
+    axes = np.array([float(v) for v in raw], dtype=np.float64).reshape(3, 3).T
+    return axes @ np.diag(spacing), origin
 
 
 def bounds_pair(low: np.ndarray, high: np.ndarray) -> list[float]:
