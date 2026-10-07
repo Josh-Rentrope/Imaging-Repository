@@ -531,6 +531,79 @@ select {
 .error-text { color: var(--danger); }
 
 .warn-text { color: var(--warn); }
+
+/* ── Label tree ──────────────────────────────────────────────────────────── */
+
+.label-tree { margin: 2px 0 6px; }
+
+.label-tree-actions {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.label-tree-actions button.ghost {
+  padding: 0 7px;
+  font-size: 11px;
+  background: var(--control);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
+.label-tree-actions button.ghost:disabled { opacity: 0.4; }
+
+.label-tree-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  font-size: 11px;
+}
+
+/* Capped because a `total` segmentation is well over a hundred classes; the
+   filter above is how you reach the end of it, not scrolling. */
+.label-tree-body {
+  max-height: 190px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+}
+
+.label-group { border-bottom: 1px solid var(--border); }
+.label-group:last-child { border-bottom: none; }
+
+.label-group-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  background: var(--panel);
+  position: sticky;
+  top: 0;
+}
+
+.label-group-name {
+  font-size: 11px;
+  color: var(--fg-muted);
+  text-align: left;
+  padding: 0;
+}
+
+.label-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px 2px 22px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.label-item:hover { background: var(--control); }
+
+/* A job the backend has not finished. Dimmed rather than coloured: it is a
+   state, not a problem. */
+.pending-text { color: var(--fg-muted); font-style: italic; }
 .mono { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 11px; }
 
 dl.inspector {

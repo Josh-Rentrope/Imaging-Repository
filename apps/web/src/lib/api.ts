@@ -11,6 +11,7 @@ import type {
   HealthBackend,
   Job,
   JobCreate,
+  SegmenterClasses,
   SourceSummary,
   VolumePayload,
 } from './types'
@@ -76,8 +77,15 @@ export const api = {
   health: () => request<{ ok: boolean; backends: HealthBackend[] }>('/health'),
   capabilities: () => request<CapabilitiesResponse>('/capabilities'),
 
-  listJobs: (limit = 50) => request<Job[]>(`/jobs?limit=${limit}`),
+  listJobs: (limit = 50, sourceId?: string) =>
+    request<Job[]>(
+      `/jobs?limit=${limit}${sourceId ? `&source_id=${encodeURIComponent(sourceId)}` : ''}`,
+    ),
   getJob: (id: string) => request<Job>(`/jobs/${id}`),
+
+  /** What a segmenter can find. Answered without running it. */
+  segmenterClasses: (task = 'total') =>
+    request<SegmenterClasses>(`/segmenter/classes?task=${encodeURIComponent(task)}`),
   submitJob: (body: JobCreate) =>
     request<Job>('/jobs', {
       method: 'POST',

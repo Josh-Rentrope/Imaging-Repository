@@ -44,6 +44,7 @@ function ResultRow({
   onRemove: () => void
 }) {
   const failed = result.job.status === 'failed' || result.job.status === 'rejected'
+  const pending = result.job.status === 'queued' || result.job.status === 'running'
   const note = summary(result.job)
 
   return (
@@ -54,7 +55,7 @@ function ResultRow({
           {result.label}
         </span>
 
-        {!failed && (
+        {!failed && !pending && (
           <>
             <button
               className="ghost"
@@ -81,6 +82,8 @@ function ResultRow({
         <p className="error-text" style={{ margin: '2px 0 0', fontSize: 11 }}>
           {result.job.error}
         </p>
+      ) : pending ? (
+        <div className="result-meta mono pending-text">{result.job.status}…</div>
       ) : (
         <div className="result-meta mono">{note ?? result.detail}</div>
       )}

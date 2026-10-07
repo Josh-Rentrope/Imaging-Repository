@@ -1,4 +1,5 @@
 import { Op, type Stage } from '../lib/types'
+import { LabelTree } from './LabelTree'
 
 /** Operations offered per source kind. A volume and an image set need different work. */
 export const OPS_BY_KIND: Record<'dicom' | 'images', string[]> = {
@@ -20,18 +21,25 @@ const OP_HINTS: Record<string, string> = {
 
 export const DEFAULT_THRESHOLD = 300
 
-/** Every label, as a surface that can be clicked. */
-export const ALL_LABELS = 'all'
-
 /** Past this many structures, extracting all of them is worth a warning. */
 const MASS_EXTRACTION_THRESHOLD = 20
 
 export interface PipelineParams {
   threshold: number
   stride: number
-  /** Which structure to surface. Only the masked path can honour it. */
-  label: string
+  /**
+   * Structures to surface, by name or id.
+   *
+   * `null` is every structure; `[]` is none picked. The two have to be
+   * distinguishable because "select none" is a real state to pass through
+   * while picking, and folding it into "all" would make clearing the list
+   * silently ask for everything.
+   */
+  labels: string[] | null
 }
+
+/** Every structure, as the backend spells it. */
+export const ALL_LABELS = 'all'
 
 /** The op that turns a segmentation into something visible. */
 export const SURFACE_AFTER_MASK = Op.ISO_SURFACE
@@ -58,7 +66,7 @@ export function buildStages(
     // The threshold is meaningless once a mask is driving the surface, and a
     // label is meaningless without one, so neither is sent in the wrong case.
     return segments
-      ? { op, params: { label: params.label, stride: params.stride } }
+      ? { op, params: { label: params.labels ?? ALL_LABELS, stride: params.stride } }
       : { op, params: { threshold: params.threshold, stride: params.stride } }
   })
 }
@@ -73,7 +81,7 @@ export function PipelineSection({
   knownLabels,
   onRun,
   canRun,
-  busy,
+  running,
 }: {
   ops: string[]
   selected: string[]
@@ -85,10 +93,15 @@ export function PipelineSection({
   knownLabels: string[]
   onRun: () => void
   canRun: boolean
-  busy: boolean
+  /** Jobs submitted and not yet finished. Shown, not gating. */
+  running: number
 }) {
   const wantsSurface = selected.includes(Op.ISO_SURFACE)
   const wantsMask = selected.includes(Op.SEGMENT)
+  const extracting = params.labels === null ? knownLabels.length : params.labels.length
+  // Nothing ticked is a job that would extract nothing. The button says so
+  // rather than letting the backend answer with an error.
+  const nothingPicked = wantsMask && wantsSurface && params.labels !== null && extracting === 0
   const span = valueRange ? valueRange[1] - valueRange[0] : 0
   // A twentieth of the range is a usable step whatever the units turn out to be.
   const step = valueRange ? Math.max(1, Math.round(span / 200)) : 10
@@ -114,35 +127,17 @@ export function PipelineSection({
         <div className="plane-block" style={{ marginTop: 8, paddingTop: 6, borderTop: '1px solid var(--border)' }}>
           {wantsMask && (
             <>
-              <label className="slider-row">
-                <span className="slider-label">label</span>
-                <input
-                  className="text-input mono"
-                  type="text"
-                  list="known-labels"
-                  value={params.label}
-                  onChange={(event) => onParamsChange({ ...params, label: event.target.value })}
-                />
-              </label>
-              {/* Names come from a previous run's mask, so the first run of a
-                  pair is typed and later ones are picked. */}
-              <datalist id="known-labels">
-                <option value={ALL_LABELS} />
-                {knownLabels.map((name) => (
-                  <option key={name} value={name} />
-                ))}
-              </datalist>
-              <p className="popover-hint" style={{ margin: '2px 0 6px' }}>
-                {knownLabels.length > 0
-                  ? `A structure name or number, or “${ALL_LABELS}”. Known: ${knownLabels.slice(0, 6).join(', ')}${knownLabels.length > 6 ? '…' : ''}.`
-                  : `A structure name or number, or “${ALL_LABELS}”. Names appear here after a segmentation has run.`}
-              </p>
-              {params.label === ALL_LABELS && knownLabels.length > MASS_EXTRACTION_THRESHOLD && (
-                // Surfacing every structure costs a surface per structure, and
-                // a full `total` segmentation is 117 of them.
-                <p className="popover-hint warn-text" style={{ margin: '0 0 6px' }}>
-                  All {knownLabels.length} structures. That is one surface per structure and can
-                  take minutes — naming one is much quicker.
+              <LabelTree
+                names={knownLabels}
+                selected={params.labels}
+                onChange={(labels) => onParamsChange({ ...params, labels })}
+              />
+              {extracting > MASS_EXTRACTION_THRESHOLD && (
+                // Surfacing many structures costs a marching-cubes pass each,
+                // and a full `total` segmentation is 117 of them.
+                <p className="popover-hint warn-text" style={{ margin: '4px 0 6px' }}>
+                  {extracting} structures. That is one surface per structure and can take
+                  minutes — narrowing it down is much quicker.
                 </p>
               )}
             </>
@@ -203,10 +198,27 @@ export function PipelineSection({
         </div>
       )}
 
+      {nothingPicked && (
+        <p className="popover-hint warn-text" style={{ margin: '4px 0 0' }}>
+          No structures picked — pick at least one, or use All.
+        </p>
+      )}
+
       <div className="controls">
-        <button className="primary" onClick={onRun} disabled={!canRun || busy || selected.length === 0}>
-          {busy ? 'Running…' : 'Run'}
+        <button
+          className="primary"
+          onClick={onRun}
+          disabled={!canRun || selected.length === 0 || nothingPicked}
+        >
+          Run
         </button>
+        {/* Reports the queue instead of disabling the button: a long job must
+            not stop the next one being submitted behind it. */}
+        {running > 0 && (
+          <span className="muted" style={{ fontSize: 12 }}>
+            {running} running
+          </span>
+        )}
       </div>
     </div>
   )

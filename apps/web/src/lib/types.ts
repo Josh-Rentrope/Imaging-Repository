@@ -35,6 +35,15 @@ export interface Capabilities {
   notes: string | null
 }
 
+export interface SegmenterClasses {
+  task: string
+  /** False when there is no usable segmenter at all, which is a different
+   *  problem from one that runs but cannot name what it finds. */
+  available: boolean
+  detail: string | null
+  classes: { id: number; name: string }[]
+}
+
 export interface CapabilitiesResponse {
   backends: Capabilities[]
   server_backend_registered: boolean
