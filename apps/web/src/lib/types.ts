@@ -146,6 +146,11 @@ export interface ResultEnvelope {
     bounds?: number[]
     /** Labels present on a labelled surface, in ascending order. */
     labels?: number[]
+    /** Cell size the surface was simplified at, in millimetres. */
+    simplify_mm?: number
+    /** Counts before simplifying, so the reduction can be stated. */
+    vertices_before?: number
+    triangles_before?: number
   } | null
   artifacts: ResultArtifact[]
   segmentation?: Segmentation | null

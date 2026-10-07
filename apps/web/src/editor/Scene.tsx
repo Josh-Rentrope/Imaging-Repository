@@ -14,7 +14,6 @@ import vtkOrientationMarkerWidget from '@kitware/vtk.js/Interaction/Widgets/Orie
 import { Corners } from '@kitware/vtk.js/Interaction/Widgets/OrientationMarkerWidget/Constants'
 import vtkActor from '@kitware/vtk.js/Rendering/Core/Actor'
 import vtkAxesActor from '@kitware/vtk.js/Rendering/Core/AxesActor'
-import vtkCellPicker from '@kitware/vtk.js/Rendering/Core/CellPicker'
 import vtkColorTransferFunction from '@kitware/vtk.js/Rendering/Core/ColorTransferFunction'
 import vtkMapper from '@kitware/vtk.js/Rendering/Core/Mapper'
 import vtkVolume from '@kitware/vtk.js/Rendering/Core/Volume'
@@ -24,6 +23,7 @@ import vtkSTLReader from '@kitware/vtk.js/IO/Geometry/STLReader'
 import vtkGenericRenderWindow from '@kitware/vtk.js/Rendering/Misc/GenericRenderWindow'
 
 import { artifactUrl } from '../lib/api'
+import { intersectBox, intersectMesh, type Ray } from './raycast'
 import {
   AXIS_COLORS,
   backgroundHex,
@@ -128,7 +128,6 @@ interface Ctx {
   surfaces: Map<string, SurfaceEntry>
   marker: ReturnType<typeof vtkOrientationMarkerWidget.newInstance> | null
   axes: ReturnType<typeof vtkAxesActor.newInstance> | null
-  picker: ReturnType<typeof vtkCellPicker.newInstance>
   /** False until something has been framed, so the first load can reset the camera. */
   framed: boolean
 }
@@ -172,7 +171,16 @@ async function loadVertexLabels(
   if (!surface.labelsRef) return null
 
   const blob = await fetchBytes(surface.labelsRef)
-  if (blob.byteLength !== pointCount * 4) return null
+  if (blob.byteLength !== pointCount * 4) {
+    // Said out loud, not silently dropped. Rejecting the array is what keeps a
+    // click from labelling the wrong vertices, but the visible symptom is only
+    // "clicking does nothing", which is indistinguishable from a broken picker.
+    console.warn(
+      `[scene] ignoring vertex labels for ${surface.id}: ${blob.byteLength / 4} ` +
+        `labels for a mesh of ${pointCount} vertices`,
+    )
+    return null
+  }
 
   let header: { legend?: Record<string, string>; counts?: Record<string, number> } | null = null
   if (surface.labelsHeaderRef) {
@@ -265,14 +273,6 @@ function createPlaneVisuals(renderer: Ctx['renderer']): Record<Axis, PlaneVisual
   return visuals
 }
 
-/**
- * The cell topology picking needs. `getInputData` is typed as a bare DataSet,
- * and cells only exist on the polydata both readers produce.
- */
-interface CellTopology {
-  getCellPoints(cellId: number): { cellPointIds: ArrayLike<number> | null } | null
-}
-
 function canvasOf(
   generic: ReturnType<typeof vtkGenericRenderWindow.newInstance>,
 ): HTMLCanvasElement | null {
@@ -294,6 +294,79 @@ function devicePixelScale(
   return canvas.width / rect.width
 }
 
+/**
+ * Build the world-space ray through a pixel.
+ *
+ * Mirrors what vtk's own picker does with the camera and the viewport, because
+ * the display-to-world conversions are only correct in that order: display
+ * coordinates are framebuffer pixels with y up, and both the flip and the
+ * device pixel ratio are already applied by the time an interactor event
+ * arrives.
+ */
+function rayThrough(
+  ctx: Ctx,
+  screenX: number,
+  screenY: number,
+): Ray | null {
+  const view = ctx.renderWindow.getViews()[0]
+  const camera = ctx.renderer.getActiveCamera()
+  if (!view || !camera) return null
+
+  const dims = view.getViewportSize(ctx.renderer)
+  if (!dims || dims[0] === 0 || dims[1] === 0) return null
+  const aspect = dims[0] / dims[1]
+
+  // The z comes from the focal point, which is what puts the sample point on
+  // the focal plane; any z along the same ray gives the same direction.
+  const focus = camera.getFocalPoint()
+  const projected = ctx.renderer.worldToNormalizedDisplay(
+    focus[0],
+    focus[1],
+    focus[2],
+    aspect,
+  )
+  const display = view.normalizedDisplayToDisplay(projected[0], projected[1], projected[2])
+  const normalized = view.displayToNormalizedDisplay(screenX, screenY, display[2])
+  const world = ctx.renderer.normalizedDisplayToWorld(
+    normalized[0],
+    normalized[1],
+    normalized[2],
+    aspect,
+  )
+
+  const origin = camera.getPosition()
+  const vx = world[0] - origin[0]
+  const vy = world[1] - origin[1]
+  const vz = world[2] - origin[2]
+  const length = Math.hypot(vx, vy, vz)
+  if (length === 0) return null
+
+  return {
+    origin: [origin[0], origin[1], origin[2]],
+    direction: [vx / length, vy / length, vz / length],
+  }
+}
+
+/** Positions and cells of a mesh, as vtk stores them. */
+interface MeshArrays {
+  positions: ArrayLike<number>
+  polys: ArrayLike<number>
+}
+
+function meshArrays(mapper: unknown): MeshArrays | null {
+  const data = (
+    mapper as { getInputData(): {
+      getPoints(): { getData(): ArrayLike<number> } | null
+      getPolys(): { getData(): ArrayLike<number> } | null
+    } | null }
+  ).getInputData()
+  const points = data?.getPoints()?.getData()
+  const polys = data?.getPolys()?.getData()
+  if (!points || !polys) return null
+  return { positions: points, polys }
+}
+
+/** Ray-cast the labelled meshes and report the nearest structure. */
 function selectAt(
   ctx: Ctx | null,
   screenX: number,
@@ -302,51 +375,96 @@ function selectAt(
 ): void {
   if (!ctx) return
 
-  ctx.picker.pick([screenX, screenY, 0], ctx.renderer)
-  const cellId = ctx.picker.getCellId()
-  const mapper = ctx.picker.getMapper()
+  const ray = rayThrough(ctx, screenX, screenY)
+  if (!ray) {
+    console.warn('[pick] no ray: the viewport has no size yet')
+    report(null)
+    return
+  }
 
-  let entry: SurfaceEntry | null = null
-  let entryKey = ''
-  for (const [id, candidate] of ctx.surfaces) {
-    if (candidate.mapper === mapper) {
-      entry = candidate
-      entryKey = id
+  const considered: string[] = []
+  const skipped: string[] = []
+
+  // Only meshes that can name what was hit. The volume is not an actor, and an
+  // unlabelled surface has nothing to report, so neither is allowed to win.
+  let best: { entry: SurfaceEntry; key: string; label: number; distance: number } | null = null
+
+  for (const [id, entry] of ctx.surfaces) {
+    const label = id.slice(0, 8)
+    if (!entry.labels) {
+      skipped.push(`${label} (no labels)`)
+      continue
+    }
+    if (!entry.actor.getVisibility()) {
+      skipped.push(`${label} (hidden)`)
+      continue
+    }
+
+    const bounds = entry.mapper.getBounds()
+    if (!intersectBox(ray, bounds)) {
+      skipped.push(`${label} (bounds miss)`)
+      continue
+    }
+
+    const arrays = meshArrays(entry.mapper)
+    if (!arrays) {
+      skipped.push(`${label} (no geometry)`)
+      continue
+    }
+
+    const hit = intersectMesh(ray, arrays.positions, arrays.polys)
+    if (!hit) {
+      skipped.push(`${label} (bounds hit, no triangle)`)
+      continue
+    }
+
+    // Any vertex of the triangle answers for it: each label is extracted as its
+    // own closed mesh, so a triangle never straddles two of them.
+    const pointId = arrays.polys[hit.triangle * 4 + 1]
+    const found = entry.labels.values[pointId] ?? 0
+    considered.push(
+      `${label} t=${hit.distance.toFixed(1)} vertex=${pointId} label=${found}`,
+    )
+
+    if (found === 0) continue
+    if (!best || hit.distance < best.distance) {
+      best = { entry, key: id, label: found, distance: hit.distance }
     }
   }
 
-  // A miss, or a hit on unlabelled geometry: either way whatever was selected
-  // before is no longer what the pointer is on.
-  if (cellId < 0 || !mapper || !entry?.labels) {
-    report(null)
-    return
+  console.groupCollapsed(
+    `[pick] ${considered.length} hit / ${skipped.length} skipped at (${Math.round(screenX)}, ${Math.round(screenY)})`,
+  )
+  console.log(
+    'ray origin',
+    ray.origin.map((v) => v.toFixed(1)),
+    'direction',
+    ray.direction.map((v) => v.toFixed(3)),
+  )
+  console.log('skipped', skipped)
+  console.log('hits', considered)
+  if (best) {
+    const name = best.entry.labels?.legend[String(best.label)] ?? `Label ${best.label}`
+    console.log('selected', name, 'label', best.label, 'at', best.distance.toFixed(1), 'mm')
+  } else {
+    console.log('selected nothing')
   }
+  console.groupEnd()
 
-  const data = (mapper as unknown as { getInputData(): CellTopology | null }).getInputData()
-  const pointId = data?.getCellPoints(cellId)?.cellPointIds?.[0]
-
-  // Any vertex of the cell answers for it: each label is extracted as its own
-  // closed mesh, so a triangle never straddles two of them.
-  if (pointId == null || pointId >= entry.labels.values.length) {
-    report(null)
-    return
-  }
-
-  const label = entry.labels.values[pointId]
-  if (label === 0) {
+  if (!best) {
     report(null)
     return
   }
 
   const rect = canvasOf(ctx.generic)?.getBoundingClientRect()
   const scale = devicePixelScale(ctx.generic)
-  const legend = entry.labels.legend[String(label)]
+  const legend = best.entry.labels?.legend[String(best.label)]
 
   report({
-    surfaceId: entryKey,
-    label,
-    name: legend ?? `Label ${label}`,
-    vertices: entry.labels.counts[String(label)] ?? 0,
+    surfaceId: best.key,
+    label: best.label,
+    name: legend ?? `Label ${best.label}`,
+    vertices: best.entry.labels?.counts[String(best.label)] ?? 0,
     x: rect ? screenX / scale : screenX,
     y: rect ? rect.height - screenY / scale : screenY,
   })
@@ -470,12 +588,6 @@ export function Scene({
     const renderer = generic.getRenderer()
     const renderWindow = generic.getRenderWindow()
 
-    const picker = vtkCellPicker.newInstance()
-    // Fraction of the window diagonal. The default 0.025 is a wide net for
-    // geometry this thin; a hair under half a percent keeps a click on a rib
-    // from reaching through to the one behind it.
-    picker.setTolerance(0.004)
-
     ctxRef.current = {
       generic,
       renderer,
@@ -489,7 +601,6 @@ export function Scene({
       surfaces: new Map(),
       marker: null,
       axes: null,
-      picker,
       framed: false,
     }
 
@@ -644,11 +755,6 @@ export function Scene({
         const labels = await loadVertexLabels(surface, data.getPoints().getNumberOfPoints())
         if (cancelled) return
 
-        // Resolving a picked cell to its points goes through the mesh's cell
-        // array, which parsing does not build — it is undefined until this is
-        // called. Rendering never needs it, so nothing else would notice.
-        if (labels) data.buildCells()
-
         ctx.renderer.addActor(actor)
         ctx.surfaces.set(surface.id, {
           actor,
@@ -727,9 +833,11 @@ export function Scene({
         // Replaces the reader's scalars rather than joining them: the mapper
         // looks up point-data scalars by name, and a PLY with its own scalars
         // would otherwise keep winning.
-        ;(entry.mapper as unknown as { getInputData(): CellTopology & {
-          getPointData(): { setScalars(array: unknown): void }
-        } }).getInputData().getPointData().setScalars(entry.colourArray)
+        ;(
+          entry.mapper as unknown as {
+            getInputData(): { getPointData(): { setScalars(array: unknown): void } }
+          }
+        ).getInputData().getPointData().setScalars(entry.colourArray)
       }
 
       // The result's own colour, normalised to full brightness, so the picked

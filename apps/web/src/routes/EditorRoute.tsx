@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   buildStages,
+  DEFAULT_SIMPLIFY_MM,
   DEFAULT_THRESHOLD,
   OPS_BY_KIND,
   PipelineSection,
@@ -26,6 +27,16 @@ import { useEditor } from '../state/editor'
 //: of minutes rather than the seconds a marching-cubes pass takes.
 const POLL_INTERVAL_MS = 1500
 const POLL_ATTEMPTS = 800
+
+/** How long Run stays disabled after a click, whatever the server does. */
+const SUBMIT_LOCK_MS = 1000
+
+/**
+ * How long Run waits for the server to acknowledge before giving up and
+ * re-enabling anyway. A submission that hangs should not leave the button dead
+ * with no way to try again.
+ */
+const SUBMIT_ACK_TIMEOUT_MS = 30_000
 
 /** Capture descriptor for a source. Photos carry no depth unless told otherwise. */
 function buildCapture(source: SourceSummary, hasDepth: boolean, hasFiducial: boolean) {
@@ -62,6 +73,7 @@ export default function EditorRoute() {
   const [params, setParams] = useState<PipelineParams>({
     threshold: DEFAULT_THRESHOLD,
     stride: 1,
+    simplify: DEFAULT_SIMPLIFY_MM,
     labels: null,
   })
   const [hasDepth, setHasDepth] = useState(false)
@@ -75,13 +87,22 @@ export default function EditorRoute() {
   // flight at once, and each row tracks its own.
   const [inFlight, setInFlight] = useState<string[]>([])
   const [segmenter, setSegmenter] = useState<SegmenterClasses | null>(null)
+  // Held while a submission is in flight, so Run cannot be pressed twice for
+  // one job. The backend answers as soon as it has accepted the job.
+  const [submitting, setSubmitting] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Polling outlives a render but must not outlive the screen.
+  // Polling outlives a render but must not outlive the screen. Set on mount as
+  // well as cleared on unmount: StrictMode mounts, unmounts and mounts again in
+  // development, and only clearing would leave this false for the real mount —
+  // which stops every poller dead and leaves rows saying "queued" for ever.
   const mounted = useRef(true)
-  useEffect(() => () => {
-    mounted.current = false
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
   }, [])
 
   const sourceId = activeSource?.source_id ?? null
@@ -217,8 +238,16 @@ export default function EditorRoute() {
   }
 
   async function run() {
-    if (!activeSource || !sourceId) return
+    if (submitting || !activeSource || !sourceId) return
     setError(null)
+    setSubmitting(true)
+
+    const startedAt = performance.now()
+    // A submission that never comes back must not leave the button dead.
+    const giveUp = window.setTimeout(() => {
+      if (mounted.current) setSubmitting(false)
+    }, SUBMIT_ACK_TIMEOUT_MS)
+
     const stages = buildStages(ops, selectedOps, params)
     const sourceKey = sourceId
 
@@ -247,6 +276,18 @@ export default function EditorRoute() {
       void follow(sourceKey, submitted.job_id)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      window.clearTimeout(giveUp)
+      // Held for a beat even when the server answers instantly: a button that
+      // flickers back is one the eye cannot tell from a mis-click, and the
+      // reflex on a mis-click is to press it again.
+      const held = performance.now() - startedAt
+      window.setTimeout(
+        () => {
+          if (mounted.current) setSubmitting(false)
+        },
+        Math.max(0, SUBMIT_LOCK_MS - held),
+      )
     }
   }
 
@@ -340,6 +381,7 @@ export default function EditorRoute() {
 
         <PipelineSection
           running={inFlight.length}
+          submitting={submitting}
           ops={ops}
           selected={selectedOps}
           onToggle={(op) =>

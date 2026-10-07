@@ -57,12 +57,60 @@ def _orient(faces: np.ndarray, basis: np.ndarray) -> np.ndarray:
     return faces[:, ::-1] if np.linalg.det(basis) > 0 else faces
 
 
+def cluster(vertices: np.ndarray, faces: np.ndarray, cell: float) -> tuple[np.ndarray, np.ndarray]:
+    """Collapse a surface onto a grid, one vertex per occupied cell.
+
+    Marching cubes emits a vertex per voxel crossing, which on a 0.7 mm grid
+    over a whole torso is millions of them — more than the screen can show and
+    far more than a click can scan. Snapping to a coarser grid removes that
+    detail without removing anything visible, and unlike subsampling the input
+    mask it cannot make a thin structure disappear: a rib one voxel wide still
+    has a cell, it just has fewer vertices in it.
+
+    The cost is sharp features and exact volume — both already approximate on a
+    marching-cubes surface. Set `cell` to 0 to leave the surface alone.
+    """
+    if cell <= 0 or len(vertices) == 0 or len(faces) == 0:
+        return vertices, faces
+
+    origin = vertices.min(axis=0)
+    keys = np.floor((vertices - origin) / cell).astype(np.int64)
+
+    # Folded into one integer per vertex rather than `np.unique(axis=0)`: the
+    # row-wise version compares void views and is several times slower on the
+    # sizes this has to handle.
+    span = keys.max(axis=0) + 1
+    flat = (keys[:, 0] * span[1] + keys[:, 1]) * span[2] + keys[:, 2]
+    _unique, inverse = np.unique(flat, return_inverse=True)
+    inverse = inverse.reshape(-1)
+
+    count = int(inverse.max()) + 1
+    totals = np.zeros((count, 3), dtype=np.float64)
+    np.add.at(totals, inverse, vertices.astype(np.float64))
+    sizes = np.bincount(inverse, minlength=count).astype(np.float64)
+    merged = (totals / sizes[:, None]).astype(np.float32)
+
+    # A triangle whose corners landed in the same cell has no area left, and one
+    # with two corners sharing a cell is a sliver; both go.
+    remapped = inverse[faces]
+    keep = (
+        (remapped[:, 0] != remapped[:, 1])
+        & (remapped[:, 1] != remapped[:, 2])
+        & (remapped[:, 0] != remapped[:, 2])
+    )
+    return merged, remapped[keep].astype(np.int32)
+
+
 @dataclass
 class Surface:
     vertices: np.ndarray  # (N, 3) float32, world space (x, y, z)
     faces: np.ndarray  # (M, 3) int32
     threshold: float
     stride: int
+    #: Counts before clustering, so the cost of simplifying is visible.
+    vertices_before: int = 0
+    triangles_before: int = 0
+    cell_mm: float = 0.0
 
 
 @dataclass
@@ -81,13 +129,22 @@ class LabelledSurface:
     legend: dict[int, str]
     counts: dict[int, int]  # label -> vertex count
     stride: int
+    vertices_before: int = 0
+    triangles_before: int = 0
+    cell_mm: float = 0.0
 
 
 class SurfaceError(Exception):
     """Extraction could not run; the message is user-facing."""
 
 
-def extract(blob: bytes, header: dict[str, Any], threshold: float, stride: int = 1) -> Surface:
+def extract(
+    blob: bytes,
+    header: dict[str, Any],
+    threshold: float,
+    stride: int = 1,
+    cell: float = 0.0,
+) -> Surface:
     dims = [int(v) for v in header["dims"]]  # [nx, ny, nz]
     basis, origin = world_transform(header)
 
@@ -138,13 +195,18 @@ def extract(blob: bytes, header: dict[str, Any], threshold: float, stride: int =
     # (z, y, x) -> (x, y, z), then through the header's own affine so the mesh
     # overlays the scan it came from.
     reordered = np.column_stack((verts[:, 2], verts[:, 1], verts[:, 0]))
-    world = reordered @ basis.T + origin
+    world = (reordered @ basis.T + origin).astype(np.float32)
+    oriented = _orient(faces, basis).astype(np.int32)
 
+    simplified, thinned = cluster(world, oriented, cell)
     return Surface(
-        vertices=world.astype(np.float32),
-        faces=_orient(faces, basis).astype(np.int32),
+        vertices=simplified,
+        faces=thinned,
         threshold=float(threshold),
         stride=stride,
+        vertices_before=int(len(world)),
+        triangles_before=int(len(oriented)),
+        cell_mm=float(cell) if cell > 0 else 0.0,
     )
 
 
@@ -153,6 +215,7 @@ def extract_labelled(
     header: dict[str, Any],
     keep: set[int] | None = None,
     stride: int = 1,
+    cell: float = 0.0,
 ) -> LabelledSurface:
     """Surface every structure in a multi-label mask, tagging each vertex.
 
@@ -204,6 +267,8 @@ def extract_labelled(
 
     pieces: list[tuple[np.ndarray, np.ndarray, int]] = []
     counts: dict[int, int] = {}
+    before_vertices = 0
+    before_triangles = 0
     for label_id in sorted(present):
         mask = labels == label_id
         occupied = np.argwhere(mask)
@@ -226,8 +291,20 @@ def extract_labelled(
         # through the header's own affine.
         local = verts + (lo - 1) * step_zyx
         local = np.column_stack((local[:, 2], local[:, 1], local[:, 0]))
-        pieces.append((local @ basis.T + origin, _orient(faces, basis), label_id))
-        counts[label_id] = int(len(local))
+        local = (local @ basis.T + origin).astype(np.float32)
+        oriented = _orient(faces, basis).astype(np.int32)
+
+        # Clustered per label, before merging. Every survivor of a piece is that
+        # piece's label, so the per-vertex labels stay exact — clustering the
+        # merged mesh instead would mix neighbours at the seams.
+        simplified, thinned = cluster(local, oriented, cell)
+        before_vertices += len(local)
+        before_triangles += len(oriented)
+        if len(simplified) == 0:
+            continue
+
+        pieces.append((simplified, thinned, label_id))
+        counts[label_id] = int(len(simplified))
 
     if not pieces:
         raise SurfaceError("the mask has labels but no extractable boundary")
@@ -253,4 +330,7 @@ def extract_labelled(
         legend={k: v for k, v in legend.items() if k in present},
         counts=counts,
         stride=stride,
+        vertices_before=before_vertices,
+        triangles_before=before_triangles,
+        cell_mm=float(cell) if cell > 0 else 0.0,
     )

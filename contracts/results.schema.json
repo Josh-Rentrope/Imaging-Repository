@@ -117,6 +117,19 @@
           "minItems": 6,
           "maxItems": 6,
           "description": "[xmin, xmax, ymin, ymax, zmin, zmax] of the extracted surface, world space."
+        },
+        "simplify_mm": {
+          "type": "number",
+          "description": "Clustering cell size the surface was simplified at, in millimetres. Absent when it was not simplified. Absolute rather than a multiple of the voxel size, so the same setting means the same thing on a 0.7 mm mask and a 2.5 mm volume."
+        },
+        "vertices_before": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Vertices before simplifying, so the reduction is a stated fact rather than an assumption."
+        },
+        "triangles_before": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },

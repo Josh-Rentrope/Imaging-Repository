@@ -919,3 +919,78 @@ def test_unknown_label_names_the_available_ones(client, monkeypatch):
     assert job["status"] == "failed"
     error = job["error"] or ""
     assert "rib_right_9" in error and "rib_left_4" in error
+
+
+# ── simplifying surfaces ───────────────────────────────────────────────────
+
+
+def test_clustering_reduces_a_surface_without_losing_it():
+    """Every cell that held vertices still holds one afterwards.
+
+    A decimation that drops a whole structure is worse than no decimation, and
+    it would be invisible in a bounding box or a triangle count.
+    """
+    from app.pipeline.isosurface import cluster
+
+    # A unit grid of vertices, so cells are predictable.
+    grid = np.stack(
+        np.meshgrid(np.arange(6), np.arange(6), np.arange(6), indexing="ij"), axis=-1
+    ).reshape(-1, 3).astype(np.float32)
+
+    # A cube per grid point's lower corner, giving a connected surface.
+    faces = []
+    for i in range(5):
+        for j in range(5):
+            for k in range(5):
+                a = (i * 6 + j) * 6 + k
+                faces.append((a, a + 1, a + 6))
+    faces = np.array(faces, dtype=np.int32)
+
+    merged, thinned = cluster(grid, faces, cell=2.0)
+    assert 0 < len(merged) < len(grid)
+    assert len(thinned) > 0
+    # Nothing may reference a vertex that no longer exists.
+    assert thinned.max() < len(merged)
+
+
+def test_clustering_is_off_by_default_and_leaves_the_surface_alone():
+    from app.pipeline.isosurface import cluster
+
+    verts = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
+    faces = np.array([[0, 1, 2]], dtype=np.int32)
+    same_v, same_f = cluster(verts, faces, cell=0.0)
+    assert same_v is verts and same_f is faces
+
+
+def test_a_simplified_surface_reports_what_it_cost(client, monkeypatch):
+    """The reduction is a trade, so the numbers that describe it are in the result."""
+    job = run_labelled_surface(client, monkeypatch, simplify=4.0)
+    assert job["status"] == "succeeded", job["error"]
+
+    geometry = job["result"]["geometry"]
+    assert geometry["simplify_mm"] == 4.0
+    assert geometry["vertices_before"] > 0
+    assert geometry["triangles_before"] > 0
+
+    mesh = next(a for a in job["result"]["artifacts"] if a["kind"] == "mesh")
+    assert mesh["vertices"] <= geometry["vertices_before"]
+    assert mesh["triangles"] <= geometry["triangles_before"]
+
+
+def test_simplifying_keeps_every_vertex_labelled(client, monkeypatch):
+    """Clustering happens before the per-label meshes are merged.
+
+    Merged first, a cluster spanning two touching labels would average their
+    vertices and the seam would take whichever label won — silently mislabelling
+    exactly the boundary a click is most likely to land on.
+    """
+    job = run_labelled_surface(client, monkeypatch, simplify=3.0)
+    assert job["status"] == "succeeded", job["error"]
+
+    mesh = next(a for a in job["result"]["artifacts"] if a["kind"] == "mesh")
+    labels = next(a for a in job["result"]["artifacts"] if a["kind"] == "labels")
+    values = np.frombuffer(
+        client.get("/artifacts/" + labels["ref"].split("://", 1)[1]).content, dtype="<i4"
+    )
+    assert len(values) == mesh["vertices"]
+    assert set(np.unique(values).tolist()) == {1, 2}

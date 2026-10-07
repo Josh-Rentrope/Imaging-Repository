@@ -12,6 +12,13 @@ export interface ResultView {
   color: [number, number, number]
 }
 
+/** Millions get abbreviated; a raw seven-digit count is unreadable in a row. */
+function formatCount(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
+  if (value >= 1_000) return `${Math.round(value / 1_000)}k`
+  return value.toLocaleString()
+}
+
 function rgb(color: [number, number, number]): string {
   return `rgb(${color.map((c) => Math.round(c * 255)).join(',')})`
 }
@@ -28,6 +35,12 @@ function summary(job: Job): string | null {
   // carries labels, one from a density threshold carries none.
   const labels = result.geometry?.labels
   if (labels && labels.length > 0) bits.push(`${labels.length} labels`)
+  // What simplifying removed, stated rather than assumed — the number is the
+  // whole point of turning it on.
+  const before = result.geometry?.triangles_before
+  if (mesh?.triangles && before && before > mesh.triangles) {
+    bits[0] = `${mesh.triangles.toLocaleString()} tris (from ${formatCount(before)})`
+  }
   if (result.measurements.length > 0) bits.push(`${result.measurements.length} measures`)
   return bits.length > 0 ? bits.join(' · ') : null
 }

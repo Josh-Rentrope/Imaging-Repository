@@ -37,6 +37,13 @@ from .isosurface import SurfaceError, extract, extract_labelled
 from .meshgen import build_dental_arch, to_ply
 from .ply import write_ply
 
+#: Cell size for clustering a surface, in millimetres. Absolute rather than a
+#: multiple of the voxel size, because the two paths run on very different
+#: grids: 2.5 mm is ~9x fewer triangles on a 0.7 mm segmentation mask and ~3x
+#: on a 1.4/2.5 mm volume, which puts both in the same workable range. 0 keeps
+#: every vertex.
+DEFAULT_SIMPLIFY_MM = 2.5
+
 #: FDI numbers per quadrant, mesial to distal.
 _UPPER_RIGHT = (18, 17, 16, 15, 14, 13, 12, 11)
 _UPPER_LEFT = (21, 22, 23, 24, 25, 26, 27, 28)
@@ -351,6 +358,7 @@ def _iso_surface_labelled(
         header,
         keep=keep,
         stride=int(params.get("stride", 1)),
+        cell=_cell_mm(params),
     )
 
     mesh_ref = storage.put(
@@ -399,6 +407,7 @@ def _iso_surface_labelled(
         "stride": surface.stride,
         "labels": sorted(surface.legend),
         "bounds": _bounds(surface.vertices),
+        **_simplification(surface),
     }
 
 
@@ -428,7 +437,9 @@ def _iso_surface_threshold(envelope: dict, params: dict, context: dict) -> None:
     threshold = float(params.get("threshold", 300))
     stride = int(params.get("stride", 1))
 
-    surface = extract(storage.get(payload.bin_ref), payload.header, threshold, stride)
+    surface = extract(
+        storage.get(payload.bin_ref), payload.header, threshold, stride, cell=_cell_mm(params)
+    )
     ref = storage.put(
         f"artifacts/{envelope['result_id']}/surface.ply",
         write_ply(surface.vertices, surface.faces),
@@ -448,6 +459,7 @@ def _iso_surface_threshold(envelope: dict, params: dict, context: dict) -> None:
         "threshold": surface.threshold,
         "stride": surface.stride,
         "bounds": _bounds(surface.vertices),
+        **_simplification(surface),
     }
 
 
@@ -482,6 +494,23 @@ def _resolve_labels(requested: Any, legend: dict[int, str]) -> set[int] | None:
             )
         keep |= found
     return keep
+
+
+def _cell_mm(params: dict) -> float:
+    """Clustering cell size for this job. 0 disables it."""
+    value = float(params.get("simplify", DEFAULT_SIMPLIFY_MM))
+    return max(0.0, value)
+
+
+def _simplification(surface) -> dict[str, Any]:
+    """What simplifying cost, so the trade is visible rather than assumed."""
+    if surface.cell_mm <= 0:
+        return {}
+    return {
+        "simplify_mm": surface.cell_mm,
+        "vertices_before": surface.vertices_before,
+        "triangles_before": surface.triangles_before,
+    }
 
 
 def _bounds(vertices) -> list[float]:

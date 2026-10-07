@@ -24,9 +24,19 @@ export const DEFAULT_THRESHOLD = 300
 /** Past this many structures, extracting all of them is worth a warning. */
 const MASS_EXTRACTION_THRESHOLD = 20
 
+/** Matches the backend's default, so the form and a bare API call agree. */
+export const DEFAULT_SIMPLIFY_MM = 2.5
+
 export interface PipelineParams {
   threshold: number
   stride: number
+  /**
+   * Cell size for simplifying the extracted surface, in millimetres. Absolute
+   * rather than a multiple of the voxel size, because the two paths run on
+   * different grids and a physical size lands both in the same range. 0 keeps
+   * every vertex.
+   */
+  simplify: number
   /**
    * Structures to surface, by name or id.
    *
@@ -65,9 +75,11 @@ export function buildStages(
     if (op !== Op.ISO_SURFACE) return { op }
     // The threshold is meaningless once a mask is driving the surface, and a
     // label is meaningless without one, so neither is sent in the wrong case.
+    // Simplifying applies to both: it is the geometry that costs, either way.
+    const shared = { stride: params.stride, simplify: params.simplify }
     return segments
-      ? { op, params: { label: params.labels ?? ALL_LABELS, stride: params.stride } }
-      : { op, params: { threshold: params.threshold, stride: params.stride } }
+      ? { op, params: { label: params.labels ?? ALL_LABELS, ...shared } }
+      : { op, params: { threshold: params.threshold, ...shared } }
   })
 }
 
@@ -82,6 +94,7 @@ export function PipelineSection({
   onRun,
   canRun,
   running,
+  submitting,
 }: {
   ops: string[]
   selected: string[]
@@ -95,6 +108,8 @@ export function PipelineSection({
   canRun: boolean
   /** Jobs submitted and not yet finished. Shown, not gating. */
   running: number
+  /** True while a submission is in flight. Gates the button, briefly. */
+  submitting: boolean
 }) {
   const wantsSurface = selected.includes(Op.ISO_SURFACE)
   const wantsMask = selected.includes(Op.SEGMENT)
@@ -195,6 +210,28 @@ export function PipelineSection({
               ? 'Subsamples the mask before extraction. Higher is faster and coarser, and every vertex still carries its label.'
               : 'Voxel subsampling. Higher is faster and coarser — useful for finding the right threshold before extracting at full resolution.'}
           </p>
+
+          <label className="slider-row" style={{ marginTop: 6 }}>
+            <span className="slider-label">simplify</span>
+            <input
+              type="range"
+              min={0}
+              max={10}
+              step={0.5}
+              value={params.simplify}
+              onChange={(event) =>
+                onParamsChange({ ...params, simplify: Number(event.target.value) })
+              }
+            />
+            <span className="slider-value mono">
+              {params.simplify > 0 ? `${params.simplify} mm` : 'off'}
+            </span>
+          </label>
+          <p className="popover-hint" style={{ margin: '2px 0 0' }}>
+            {params.simplify > 0
+              ? `Collapses detail finer than ${params.simplify} mm. `
+              : ''}
+          </p>
         </div>
       )}
 
@@ -208,9 +245,9 @@ export function PipelineSection({
         <button
           className="primary"
           onClick={onRun}
-          disabled={!canRun || selected.length === 0 || nothingPicked}
+          disabled={!canRun || selected.length === 0 || nothingPicked || submitting}
         >
-          Run
+          {submitting ? 'Queuing…' : 'Run'}
         </button>
         {/* Reports the queue instead of disabling the button: a long job must
             not stop the next one being submitted behind it. */}
