@@ -257,7 +257,13 @@ def _iso_surface(envelope: dict, params: dict, context: dict) -> None:
 
     record = sources.get(str(source_id))
     if record is None:
-        raise SurfaceError(f"no source {source_id!r}")
+        # Usually means the source was deleted, or the server restarted against
+        # a different data directory while the browser still listed it.
+        raise SurfaceError(
+            f"no source {source_id!r} in the store. It may have been deleted, or the "
+            "server may be running against a different data directory. Re-upload the "
+            "series and run again."
+        )
 
     payload = sources.volume_payload(record)
     if payload is None:

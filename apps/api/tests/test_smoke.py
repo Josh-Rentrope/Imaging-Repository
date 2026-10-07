@@ -462,3 +462,31 @@ def test_iso_surface_without_a_source_fails_cleanly(client):
     job = client.post("/jobs", json={"stages": [{"op": "iso_surface"}], "capture": {}}).json()
     assert job["status"] == "failed"
     assert "source_id" in (job["error"] or "")
+
+
+def test_iso_surface_rejects_a_single_slice_source(client):
+    """A 1-voxel-thick volume has no interior to extract a surface from.
+
+    skimage's own error for this says nothing about slice counts, so the guard
+    has to name the real problem.
+    """
+    series_uid = generate_uid()
+    source = upload_dicom(client, [("only.dcm", make_slice(0, series_uid, block=True))]).json()
+    job = client.post(
+        "/jobs",
+        json={"stages": [{"op": "iso_surface", "params": {"threshold": 500}}],
+              "capture": {"source_id": source["source_id"]}},
+    ).json()
+    assert job["status"] == "failed"
+    assert "at least 2 along every axis" in (job["error"] or "")
+
+
+def test_iso_surface_names_a_missing_source(client):
+    job = client.post(
+        "/jobs",
+        json={"stages": [{"op": "iso_surface", "params": {"threshold": 500}}],
+              "capture": {"source_id": "11111111-2222-3333-4444-555555555555"}},
+    ).json()
+    assert job["status"] == "failed"
+    error = job["error"] or ""
+    assert "no source" in error and "Re-upload" in error

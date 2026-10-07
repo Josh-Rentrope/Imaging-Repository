@@ -40,6 +40,15 @@ def extract(blob: bytes, header: dict[str, Any], threshold: float, stride: int =
     if len(blob) != expected:
         raise SurfaceError(f"volume payload is {len(blob)} bytes, expected {expected}")
 
+    # Marching cubes needs a voxel to have neighbours on every side. A single
+    # slice assembles into a 1-voxel-thick "volume" that has no interior, and
+    # skimage's own error for it says nothing about the slice count.
+    if min(nx, ny, nz) < 2:
+        raise SurfaceError(
+            f"volume is {nx}x{ny}x{nz} voxels and needs at least 2 along every axis; "
+            f"this source has {nz} slice(s), so there is nothing to extract a surface from"
+        )
+
     # frombuffer hands back a read-only view over the bytes, and marching cubes
     # assigns to `.shape` internally, so it needs an owned writable array.
     # `np.ascontiguousarray` will NOT do: it is a no-op for an already-contiguous
