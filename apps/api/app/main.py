@@ -11,14 +11,46 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .config import get_settings
+from .config import Settings, get_settings
 from .jobs import JobStore
 from .pipeline import BackendRegistry
 from .pipeline import solvers as solver_registry
 from .routers import artifacts, exports, health, jobs, samples, segmenter, solvers, sources
 from .sources import SourceStore
-from .storage import LocalStorage
+from .spaces import SpacesStorage
+from .storage import LocalStorage, Storage
 from .tenancy import ViewerMiddleware, ViewerScopedStorage
+
+
+def build_storage(settings: Settings) -> Storage:
+    """The backend named by configuration.
+
+    An unknown name is refused at startup rather than falling back, because the
+    fallback would be a store that silently accepts writes and loses them the
+    moment the container is replaced. A deployment that says `spaces` and gets a
+    container filesystem is worse than one that does not start.
+    """
+    if settings.storage_backend == "local":
+        return LocalStorage(settings.data_dir)
+
+    if settings.storage_backend == "spaces":
+        if not settings.spaces_bucket:
+            raise RuntimeError(
+                "BONE_VIEWER_STORAGE=spaces needs BONE_VIEWER_SPACES_BUCKET. "
+                "Without it there is nowhere to put anything."
+            )
+        return SpacesStorage(
+            bucket=settings.spaces_bucket,
+            region=settings.spaces_region,
+            access_key=settings.spaces_key_id,
+            secret_key=settings.spaces_secret,
+            endpoint=settings.spaces_endpoint or None,
+        )
+
+    raise RuntimeError(
+        f"unknown BONE_VIEWER_STORAGE {settings.storage_backend!r}; "
+        "expected 'local' or 'spaces'"
+    )
 
 
 @asynccontextmanager
@@ -31,7 +63,7 @@ async def lifespan(app: FastAPI):
     # One store for the process, scoped to whichever viewer is in play at the
     # moment of each call. Every holder below therefore stays viewer-agnostic.
     app.state.storage = ViewerScopedStorage(
-        LocalStorage(settings.data_dir), enabled=settings.multi_tenant
+        build_storage(settings), enabled=settings.multi_tenant
     )
     # The source store comes first: the pipeline reads volumes out of it.
     app.state.source_store = SourceStore(app.state.storage)

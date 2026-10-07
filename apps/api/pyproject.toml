@@ -12,6 +12,10 @@ dependencies = [
     "numpy>=2.5.3",
     "scikit-image>=0.26.0",
     "nibabel>=5.4.2",
+    # For the Spaces backend. A main dependency rather than an extra, because
+    # the deployment uses it: an optional import that is missing in production
+    # is a failure discovered at deploy time instead of at review time.
+    "boto3>=1.35",
 ]
 
 [project.optional-dependencies]

@@ -15,6 +15,17 @@ class Settings(BaseModel):
 
     data_dir: Path = API_DIR / ".data"
 
+    #: Where bytes live: `local` for a directory on this machine, `spaces` for a
+    #: DigitalOcean Spaces bucket. See `app/spaces.py`.
+    storage_backend: str = "local"
+
+    spaces_bucket: str = ""
+    spaces_region: str = "nyc3"
+    #: Derived from the region when unset, which is right for every DO region.
+    spaces_endpoint: str = ""
+    spaces_key_id: str = ""
+    spaces_secret: str = ""
+
     #: Optional stage recordings, replayed in place of generated output.
     recordings_dir: Path = API_DIR / "recordings"
 
@@ -23,6 +34,17 @@ class Settings(BaseModel):
     cors_origins: str = "*"
 
     enable_diagnostic_tasks: bool = False
+
+    #: Whether `POST /sources/remote` will fetch a URL the caller names.
+    #:
+    #: On by default because it is what makes local work convenient, and off in
+    #: the deployment. `app/fetch.py` is the most dangerous code in the repo: it
+    #: makes the server perform network requests and unpack archives on a
+    #: stranger's instruction, and its own docstring says the DNS-rebinding gap
+    #: must be closed before it is "exposed beyond a trusted operator". A public
+    #: hostname is exactly that exposure, so the gate is the honest answer until
+    #: the connection is pinned to a vetted address.
+    enable_remote_fetch: bool = True
 
     #: Whether a viewer is resolved per request and given their own folder.
     #:
@@ -56,10 +78,19 @@ class Settings(BaseModel):
 def get_settings() -> Settings:
     return Settings(
         data_dir=Path(os.environ.get("BONE_VIEWER_DATA_DIR", API_DIR / ".data")),
+        storage_backend=os.environ.get("BONE_VIEWER_STORAGE", "local").strip().lower(),
+        spaces_bucket=os.environ.get("BONE_VIEWER_SPACES_BUCKET", ""),
+        spaces_region=os.environ.get("BONE_VIEWER_SPACES_REGION", "nyc3"),
+        spaces_endpoint=os.environ.get("BONE_VIEWER_SPACES_ENDPOINT", ""),
+        spaces_key_id=os.environ.get("BONE_VIEWER_SPACES_KEY", ""),
+        spaces_secret=os.environ.get("BONE_VIEWER_SPACES_SECRET", ""),
         recordings_dir=Path(os.environ.get("BONE_VIEWER_RECORDINGS_DIR", API_DIR / "recordings")),
         backend=os.environ.get("BONE_VIEWER_BACKEND", "auto"),
         cors_origins=os.environ.get("BONE_VIEWER_CORS_ORIGINS", "*"),
         enable_diagnostic_tasks=_truthy(os.environ.get("BONE_VIEWER_ENABLE_DIAGNOSTIC", "")),
+        enable_remote_fetch=_truthy_default(
+            os.environ.get("BONE_VIEWER_ENABLE_REMOTE_FETCH", ""), True
+        ),
         multi_tenant=_truthy_default(os.environ.get("BONE_VIEWER_MULTI_TENANT", ""), True),
         viewer_cookie_name=os.environ.get("BONE_VIEWER_COOKIE_NAME", "bone_viewer"),
         viewer_cookie_max_age=int(

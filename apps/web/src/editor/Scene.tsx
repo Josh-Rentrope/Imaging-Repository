@@ -22,7 +22,7 @@ import vtkPLYReader from '@kitware/vtk.js/IO/Geometry/PLYReader'
 import vtkSTLReader from '@kitware/vtk.js/IO/Geometry/STLReader'
 import vtkGenericRenderWindow from '@kitware/vtk.js/Rendering/Misc/GenericRenderWindow'
 
-import { artifactUrl } from '../lib/api'
+import { artifactUrl, fetchArtifact } from '../lib/api'
 import { intersectBox, intersectMesh, type Ray, type Visibility } from './raycast'
 import {
   AXIS_COLORS,
@@ -146,7 +146,7 @@ const CLICK_SLOP_PX = 4
 const DIMMED: [number, number, number] = [104, 112, 122]
 
 async function fetchBytes(ref: string): Promise<ArrayBuffer> {
-  const response = await fetch(artifactUrl(ref))
+  const response = await fetchArtifact(artifactUrl(ref))
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
   return response.arrayBuffer()
 }
@@ -184,7 +184,7 @@ async function loadVertexLabels(
 
   let header: { legend?: Record<string, string>; counts?: Record<string, number> } | null = null
   if (surface.labelsHeaderRef) {
-    const response = await fetch(artifactUrl(surface.labelsHeaderRef))
+    const response = await fetchArtifact(artifactUrl(surface.labelsHeaderRef))
     if (response.ok) header = await response.json()
   }
 
@@ -702,7 +702,7 @@ export function Scene({
     setStatus('Loading volume…')
 
     const load = async () => {
-      const header: VolumeHeader = await (await fetch(artifactUrl(model.volume!.headerRef))).json()
+      const header: VolumeHeader = await (await fetchArtifact(artifactUrl(model.volume!.headerRef))).json()
       const buffer = await fetchBytes(model.volume!.binRef)
       if (cancelled) return
 

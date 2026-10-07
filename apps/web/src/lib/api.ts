@@ -1,9 +1,17 @@
 /**
  * API client.
  *
- * Everything goes through `/api`, which Vite proxies to the backend in dev, so
- * the browser is same-origin and there is no environment-specific URL handling
- * in components.
+ * Two topologies, one place that knows about them.
+ *
+ * In development the app is served by Vite and `/api` is proxied to the backend,
+ * so the browser is same-origin. Deployed, the API is a separate origin, so the
+ * base has to be supplied at build time as `VITE_API_BASE`; leaving it unset
+ * keeps the relative default and nothing changes locally.
+ *
+ * Everything that decides where the API lives -- the base, whether a request
+ * carries credentials -- lives here, so a component cannot get it subtly wrong.
+ * It has been got wrong before: `ImageView` built its own `/api/...` string, and
+ * a change to `BASE` alone would have left every DICOM thumbnail 404ing.
  */
 
 import type {
@@ -20,7 +28,20 @@ import type {
   VolumePayload,
 } from './types'
 
-const BASE = '/api'
+/**
+ * Where the API is. Trailing slashes are trimmed so a base of
+ * `https://api.example.com/` does not produce `//health`.
+ */
+export const API_BASE = (import.meta.env.VITE_API_BASE ?? '/api').replace(/\/+$/, '')
+
+/**
+ * Requests carry the viewer cookie.
+ *
+ * The cookie identifies a viewer, and a viewer cannot be read without it, so a
+ * cross-origin read that omits it is answered with somebody else's data being
+ * invisible -- or, for an artifact ref, a 404. Same-origin this is a no-op.
+ */
+const CREDENTIALS: RequestCredentials = 'include'
 
 export class ApiError extends Error {
   constructor(
@@ -36,10 +57,10 @@ export class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response
   try {
-    response = await fetch(`${BASE}${path}`, init)
+    response = await fetch(`${API_BASE}${path}`, { credentials: CREDENTIALS, ...init })
   } catch (cause) {
     throw new ApiError(
-      `Cannot reach the API at ${BASE}. Start it with: cd apps/api && uv run uvicorn app.main:app --reload --port 8787`,
+      `Cannot reach the API at ${API_BASE}. Start it with: cd apps/api && uv run uvicorn app.main:app --reload --port 8787`,
       0,
       cause,
     )
@@ -66,7 +87,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 /** Turn an opaque storage ref into something fetchable. */
 export function artifactUrl(ref: string): string {
   const key = ref.includes('://') ? ref.split('://', 2)[1] : ref
-  return `${BASE}/artifacts/${key}`
+  return `${API_BASE}/artifacts/${key}`
+}
+
+/**
+ * Read an artifact.
+ *
+ * A mesh or a volume is still a read against the API, so it carries the viewer
+ * cookie like every other call. A bare `fetch` would omit it cross-origin, which
+ * would not look like a permissions problem — it would look like the artifact
+ * having been deleted.
+ */
+export function fetchArtifact(url: string): Promise<Response> {
+  return fetch(url, { credentials: CREDENTIALS })
 }
 
 function uploadForm(files: File[], workspaceId: string, setId: string): FormData {
@@ -141,8 +174,9 @@ export const api = {
     format: string
     include_labels: boolean
   }): Promise<Blob> => {
-    const response = await fetch(`${BASE}/exports`, {
+    const response = await fetch(`${API_BASE}/exports`, {
       method: 'POST',
+      credentials: CREDENTIALS,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })

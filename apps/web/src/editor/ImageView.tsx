@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-import { api } from '../lib/api'
+import { API_BASE, api } from '../lib/api'
 import type { SourceImages, SourceSummary } from '../lib/types'
 
 /** Contrast setting. Named apart from the DOM's `Window`, which it would shadow. */
@@ -16,9 +16,14 @@ interface WindowLevel {
  * view are guaranteed to be looking at the same data in the same order. An
  * uploaded photo is served as itself, because that is what feeds the
  * reconstruction and re-encoding it would only lose information.
+ *
+ * Built on `API_BASE` rather than a literal, because these are `<img src>` and
+ * nothing else would catch it: the API being on another origin in the deployed
+ * topology turns a hardcoded `/api` into a 404 on every slice, with no error a
+ * component could report.
  */
 function imageUrl(sourceId: string, index: number, window: WindowLevel | null): string {
-  const base = `/api/sources/${sourceId}/images/${index}`
+  const base = `${API_BASE}/sources/${sourceId}/images/${index}`
   if (!window || (window.center === null && window.width === null)) return base
   const params = new URLSearchParams()
   if (window.center !== null) params.set('level', String(window.center))

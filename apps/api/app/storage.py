@@ -12,8 +12,11 @@ handed to one viewer cannot be read by another. Nothing outside this module
 resolves a filesystem path, which is what lets the backend be swapped without
 touching the routes.
 
-`local://` names the backend, not the tenant. The scope rides in the key, so the
-scheme does not change when the bytes move into a bucket.
+`local://` is one scheme for every backend, and the name is historical -- it dates
+from when the only backend was a local directory. It is kept because refs are
+persisted inside source records and job records, so changing it would invalidate
+every ref already written. The scheme identifies *the store this deployment uses*;
+the key is what carries meaning, and the scope rides in the key.
 """
 
 from __future__ import annotations

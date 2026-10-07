@@ -7,7 +7,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from ..deps import get_source_store
+from ..config import Settings
+from ..deps import get_config, get_source_store
 from ..fetch import RemoteError, fetch_dataset, origin_of
 from ..samples import catalogue
 from ..sources import SourceStore, to_summary
@@ -34,13 +35,31 @@ class RemoteRequest(BaseModel):
 def import_remote(
     request: RemoteRequest,
     store: Annotated[SourceStore, Depends(get_source_store)],
+    settings: Annotated[Settings, Depends(get_config)],
 ) -> dict:
     """Download a URL and add what it contains as a normal source.
 
     The archive is unpacked server-side, so the client never has to hold it. That
     is also why the checks in `fetch.py` matter: this endpoint makes the server
     fetch and unpack something a user named.
+
+    Refused outright when the server is not configured for it. This is the one
+    route that turns a caller's string into network activity performed from
+    inside whatever network the server sits in, and on a public hostname there is
+    no operator to be trusted -- so the deployment turns it off and says so,
+    rather than relying on the checks in `fetch.py` being complete.
     """
+    if not settings.enable_remote_fetch:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail=(
+                "This server will not fetch remote URLs. It requires "
+                "BONE_VIEWER_ENABLE_REMOTE_FETCH, which is off here because the API "
+                "is reachable from outside a trusted network. Upload the files "
+                "instead, or turn the setting on somewhere private."
+            ),
+        )
+
     try:
         files = fetch_dataset(request.url)
     except RemoteError as exc:

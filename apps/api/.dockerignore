@@ -1,0 +1,26 @@
+# The build context is `apps/api`, so anything not excluded here is uploaded into
+# every build. `.data` is the local development store: gigabytes of uploaded
+# DICOM, generated meshes and volumes, and real patient data the moment anyone
+# drags a real scan in. It must never leave this machine, let alone ride along in
+# a build that a third party runs.
+
+.data/
+.inflight/
+
+# Local virtualenv and caches. The image installs from uv.lock instead.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Tests are not needed to run the API, and the contract schemas they validate
+# against live outside this directory.
+tests/
+
+# Nothing here is read at runtime.
+Dockerfile
+.dockerignore
+scripts/
+recordings/

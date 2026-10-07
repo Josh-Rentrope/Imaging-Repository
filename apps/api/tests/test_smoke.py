@@ -1491,3 +1491,41 @@ def test_a_refused_url_is_a_client_error_with_a_reason(client, monkeypatch):
     )
     assert response.status_code == 400
     assert "not public" in response.json()["detail"]
+
+
+def test_the_remote_import_can_be_turned_off(tmp_path, monkeypatch):
+    """The route that makes the server act on a caller's URL, refused outright.
+
+    Built as its own app rather than reusing the fixture, because the setting is
+    read when the app starts: an app already running when the flag changed would
+    still be the one being tested.
+    """
+    monkeypatch.setenv("BONE_VIEWER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("BONE_VIEWER_RECORDINGS_DIR", str(tmp_path / "recordings"))
+    monkeypatch.setenv("BONE_VIEWER_MULTI_TENANT", "0")
+    monkeypatch.setenv("BONE_VIEWER_ENABLE_REMOTE_FETCH", "0")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    from app import fetch
+
+    def never(url):
+        raise AssertionError("the gate let a fetch through")
+
+    monkeypatch.setattr(fetch, "download", never)
+
+    with TestClient(create_app()) as gated:
+        response = gated.post(
+            "/sources/remote",
+            json={
+                # The classic SSRF target, which is the point of the gate.
+                "url": "http://169.254.169.254/latest/meta-data/",
+                "workspace_id": "w",
+                "set_id": "s",
+            },
+        )
+
+    assert response.status_code == 403, response.text
+    assert "BONE_VIEWER_ENABLE_REMOTE_FETCH" in response.json()["detail"]
+    get_settings.cache_clear()
