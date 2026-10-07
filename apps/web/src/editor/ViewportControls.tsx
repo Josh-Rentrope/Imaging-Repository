@@ -384,6 +384,14 @@ export function ViewportControls({
             <label className="field">
               <input
                 type="checkbox"
+                checked={settings.showVolume}
+                onChange={(event) => patch({ showVolume: event.target.checked })}
+              />
+              <span className="field-label">CT volume</span>
+            </label>
+            <label className="field">
+              <input
+                type="checkbox"
                 checked={settings.showOrientation}
                 onChange={(event) => patch({ showOrientation: event.target.checked })}
               />

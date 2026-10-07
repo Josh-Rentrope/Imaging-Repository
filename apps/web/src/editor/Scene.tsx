@@ -471,11 +471,12 @@ export function Scene({ model, settings }: { model: SceneModel; settings: Viewpo
   useEffect(() => {
     const ctx = ctxRef.current
     if (!ctx) return
+    ctx.volume?.setVisibility(settings.showVolume)
     for (const surface of model.surfaces) {
       ctx.surfaces.get(surface.id)?.actor.setVisibility(surface.visible)
     }
     ctx.renderWindow.render()
-  }, [model.surfaces, revision])
+  }, [model, settings.showVolume, revision])
 
   // ── background ───────────────────────────────────────────────────────────
   useEffect(() => {
@@ -557,7 +558,10 @@ export function Scene({ model, settings }: { model: SceneModel; settings: Viewpo
     }
     ctx.volumeMapper?.modified()
     ctx.renderWindow.render()
-  }, [settings.planes, surfaceKey, volumeKey, revision])
+    // Depends on `model`, not on `surfaceKey`: the key identifies which meshes
+    // are loaded, and toggling a result's clip flag changes none of it, so
+    // keying on it would leave the planes on a surface just exempted.
+  }, [settings.planes, model, revision])
 
   return (
     <div style={{ position: 'absolute', inset: 0 }}>

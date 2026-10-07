@@ -31,6 +31,8 @@ export interface ViewportSettings {
   background: BackgroundName
   customBackground: string
   showOrientation: boolean
+  /** Hide the scan while keeping the surfaces extracted from it. */
+  showVolume: boolean
   /** [low, high] as fractions of the value range. */
   density: [number, number]
   densityUnit: DensityUnit
@@ -75,6 +77,7 @@ export const DEFAULT_SETTINGS: ViewportSettings = {
   background: 'dark',
   customBackground: '#7a4a9c',
   showOrientation: true,
+  showVolume: true,
   density: [0, 1],
   densityUnit: 'fraction',
   cutAboveHigh: true,
