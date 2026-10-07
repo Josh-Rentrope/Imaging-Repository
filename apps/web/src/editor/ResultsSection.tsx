@@ -1,4 +1,8 @@
-import type { Job } from '../lib/types'
+import { useState } from 'react'
+
+import type { Job, SourceKind } from '../lib/types'
+import { Info } from './Info'
+import { ProvenanceHover } from './ProvenancePopup'
 
 /** A pipeline result being displayed, with its own display flags. */
 export interface ResultView {
@@ -47,26 +51,62 @@ function summary(job: Job): string | null {
 
 function ResultRow({
   result,
+  sourceKind,
+  workflow,
   onToggleVisible,
   onToggleClipped,
   onRemove,
+  onRename,
 }: {
   result: ResultView
+  sourceKind: SourceKind | null
+  workflow: string | null
   onToggleVisible: () => void
   onToggleClipped: () => void
   onRemove: () => void
+  onRename: (name: string | null) => void
 }) {
   const failed = result.job.status === 'failed' || result.job.status === 'rejected'
   const pending = result.job.status === 'queued' || result.job.status === 'running'
   const note = summary(result.job)
+  const [editing, setEditing] = useState<string | null>(null)
+
+  const commitRename = () => {
+    if (editing === null) return
+    const trimmed = editing.trim()
+    // An empty box means "go back to the derived name" rather than an empty row.
+    onRename(trimmed === result.label ? null : trimmed || null)
+    setEditing(null)
+  }
 
   return (
     <li className="result-item">
       <div className="result-row">
         <span className="axis-dot" style={{ background: rgb(result.color) }} />
-        <span className="source-item-name" title={result.detail}>
-          {result.label}
-        </span>
+
+        {editing === null ? (
+          <ProvenanceHover job={result.job} sourceKind={sourceKind} workflow={workflow}>
+            <button
+              className="source-item-name result-name"
+              title={`${result.detail} — click to rename`}
+              onClick={() => setEditing(result.label)}
+            >
+              {result.label}
+            </button>
+          </ProvenanceHover>
+        ) : (
+          <input
+            className="text-input"
+            autoFocus
+            value={editing}
+            onChange={(event) => setEditing(event.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') commitRename()
+              if (event.key === 'Escape') setEditing(null)
+            }}
+          />
+        )}
 
         {!failed && !pending && (
           <>
@@ -106,15 +146,22 @@ function ResultRow({
 
 export function ResultsSection({
   results,
+  sourceKind,
+  workflow,
   onToggleVisible,
   onToggleClipped,
   onRemove,
+  onRename,
   onClear,
 }: {
   results: ResultView[]
+  /** Shared by every row: results are listed per source. */
+  sourceKind: SourceKind | null
+  workflow: string | null
   onToggleVisible: (id: string) => void
   onToggleClipped: (id: string) => void
   onRemove: (id: string) => void
+  onRename: (id: string, name: string | null) => void
   onClear: () => void
 }) {
   if (results.length === 0) return null
@@ -138,16 +185,19 @@ export function ResultsSection({
           <ResultRow
             key={result.id}
             result={result}
+            sourceKind={sourceKind}
+            workflow={workflow}
             onToggleVisible={() => onToggleVisible(result.id)}
             onToggleClipped={() => onToggleClipped(result.id)}
             onRemove={() => onRemove(result.id)}
+            onRename={(name) => onRename(result.id, name)}
           />
         ))}
       </ul>
 
       <p className="popover-hint" style={{ margin: '8px 0 0' }}>
-        <span className="mono">✂</span> marks a result the cutting planes act on. Change the
-        parameters above and run again to compare — each result keeps its own settings.
+        each result has its own settings
+        <Info text="Change the parameters above and run again to compare — a new result is added rather than replacing the last one, and each keeps its own visibility, clipping and parameters. ✂ marks the ones the cutting planes act on." />
       </p>
     </div>
   )

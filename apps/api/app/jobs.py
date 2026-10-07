@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .models import Job, JobCreate, JobStatus
+from .storage import LocalStorage
 from .pipeline import (
     DIAGNOSTIC_OPS,
     BackendRegistry,
@@ -35,8 +36,12 @@ class JobStore:
         registry: BackendRegistry,
         data_dir: Path | None = None,
         max_jobs: int = MAX_JOBS,
+        storage: LocalStorage | None = None,
     ) -> None:
         self._registry = registry
+        # Held so deleting a job can delete what it produced, rather than
+        # leaving the bytes behind for the next directory walk to find.
+        self._storage = storage
         self._jobs: dict[str, Job] = {}
         self._max_jobs = max_jobs
         # Workers mutate jobs while request threads read them.
@@ -69,6 +74,42 @@ class JobStore:
             if deadline is not None and time.monotonic() > deadline:
                 return job
             time.sleep(0.01)
+
+    def rename(self, job_id: str, name: str | None) -> Job | None:
+        updated = self._replace(job_id, name=name)
+        if updated is not None:
+            self._persist(updated)
+        return updated
+
+    def delete(self, job_id: str) -> Job | None:
+        """Forget a job and every artifact it points at.
+
+        Both halves matter. Dropping the record alone leaves the mesh on disk to
+        be re-indexed by anything that walks the directory, and dropping the
+        files alone leaves a job whose result 404s.
+        """
+        with self._lock:
+            job = self._jobs.pop(job_id, None)
+        if job is None:
+            return None
+
+        if self._dir is not None:
+            (self._dir / f"{job_id}.json").unlink(missing_ok=True)
+        self._remove_artifacts(job)
+        return job
+
+    def _remove_artifacts(self, job: Job) -> None:
+        if self._storage is None or job.result is None:
+            return
+        result_id = job.result.get("result_id")
+        if not result_id:
+            return
+        try:
+            self._storage.remove_tree(f"artifacts/{result_id}")
+        except (OSError, ValueError):
+            # The record is already gone; a file that will not delete is not a
+            # reason to fail the request.
+            pass
 
     def _replace(self, job_id: str, **fields) -> Job | None:
         """Update a job under the lock, returning the new state.
@@ -135,6 +176,7 @@ class JobStore:
             # Kept so a reloaded page can ask which results belong to the source
             # it is showing, rather than every job the server has ever run.
             source_id=(request.capture or {}).get("source_id"),
+            workflow=request.workflow,
         )
 
         if any(op in DIAGNOSTIC_OPS for op in ops) and not (
@@ -195,6 +237,7 @@ class JobStore:
                 self._jobs.pop(oldest.job_id, None)
                 if self._dir is not None:
                     (self._dir / f"{oldest.job_id}.json").unlink(missing_ok=True)
+                self._remove_artifacts(oldest)
 
 
 def _source_of(job: Job) -> str | None:

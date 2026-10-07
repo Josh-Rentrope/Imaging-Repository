@@ -50,6 +50,65 @@ _UPPER_LEFT = (21, 22, 23, 24, 25, 26, 27, 28)
 
 _ENVELOPE_VERSION = "1.0"
 
+#: What each stage actually runs. Recorded on every job so an exported mesh can
+#: be traced back to the tool and version that made it — a mesh whose origin is
+#: unknown is not usable clinical data, however good it looks.
+#:
+#: `algorithm` names the general approach, not the implementation. The private
+#: backend replaces these entries for its own stages; the public ones name
+#: publicly available tools, which is exactly the split D6 describes.
+_IMPLEMENTATIONS: dict[str, dict[str, Any]] = {
+    Op.ISOLATE_VOLUME: {
+        "tool": "pydicom",
+        "description": "Assembles the slices into a volume, ordered by their position along the scan axis.",
+        "algorithm": "slice stacking, sorted by ImagePositionPatient along the slice normal",
+        "notes": "Window from the series' own WindowCenter/WindowWidth when present.",
+    },
+    Op.SEGMENT: {
+        "tool": "TotalSegmentator",
+        "description": "Finds anatomical structures in a CT volume and labels each one by name.",
+        "algorithm": "nnU-Net, multi-label, task-dependent",
+        "notes": "Run as an external command; weights are downloaded on first use.",
+    },
+    Op.ISO_SURFACE: {
+        "tool": "scikit-image",
+        "description": "Extracts a triangle surface from the volume or mask by marching cubes.",
+        "algorithm": "marching cubes, per label when a mask is present",
+        "notes": "Vertex clustering post-process removes detail below the simplify cell.",
+    },
+    Op.RECTIFY: {
+        "tool": "—",
+        "description": "Aligns the depth frames to the colour images and removes lens distortion.",
+        "algorithm": "distortion and depth-to-colour alignment"},
+    Op.RECONSTRUCT: {
+        "tool": "—",
+        "description": "Builds a surface from the photographs and their camera positions.",
+        "algorithm": "multi-view stereo and fusion",
+        # Named here because the choice is a real one a reader will want to know.
+        "notes": "Private stage. The stage is described; the solver is not.",
+    },
+    Op.ESTIMATE_POSES: {
+        "tool": "—",
+        "description": "Works out where the camera was for each photograph.",
+        "algorithm": "device visual-inertial tracking, or structure-from-motion",
+        "notes": "Which one applied is recorded per run: see geometry.pose_source.",
+    },
+    Op.MEASURE: {
+        "tool": "—",
+        "description": "Derives arch and tooth measurements from the reconstructed geometry.",
+        "algorithm": "derived from the reconstructed geometry"},
+    Op.PX2TOOTH: {
+        "tool": "PX2Tooth",
+        "description": "Reconstructs the teeth as a point cloud from a single panoramic radiograph.",
+        "algorithm": "point-cloud regression from a single panoramic radiograph",
+        "notes": "Reference: MICCAI 2024. Scale is reported unverified.",
+    },
+    Op.DETECT_CARIES: {
+        "tool": "—",
+        "description": "Looks for caries and periodontal change on a radiograph.",
+        "algorithm": "not implemented"},
+}
+
 
 class FixtureBackend:
     def __init__(
@@ -101,7 +160,11 @@ class FixtureBackend:
             "measurements": [],
             "quality": {"gate_passed": True, "rejections": []},
             "warnings": [],
-            "provenance": {"backend": BackendId.FIXTURE, "started_at": started.isoformat()},
+            "provenance": {
+                "backend": BackendId.FIXTURE,
+                "started_at": started.isoformat(),
+                "stages": [],
+            },
         }
 
         context: dict[str, Any] = {
@@ -114,11 +177,28 @@ class FixtureBackend:
             handler = self._handlers.get(stage.op)
             if handler is None:
                 raise OpNotSupported(stage.op)
+
+            # Recorded before the stage runs, so a stage that fails is still
+            # accounted for. A manifest listing only the stages that succeeded
+            # describes a pipeline that was never run.
+            envelope["provenance"]["stages"].append(
+                {
+                    "op": stage.op,
+                    "params": stage.params,
+                    **_IMPLEMENTATIONS.get(stage.op, {"tool": "unknown", "algorithm": "unknown"}),
+                }
+            )
+            started_stage = datetime.now(UTC)
+
             recording = self._recording(stage.op)
             if recording is not None:
                 _merge_recording(envelope, recording)
             else:
                 handler(envelope, stage.params, context)
+
+            envelope["provenance"]["stages"][-1]["duration_ms"] = int(
+                (datetime.now(UTC) - started_stage).total_seconds() * 1000
+            )
             envelope["ops"].append(stage.op)
 
         envelope["model_version"] = "fixture@" + "+".join(envelope["ops"])

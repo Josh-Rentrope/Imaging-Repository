@@ -251,6 +251,39 @@ button, select, input {
   color: var(--fg-muted);
 }
 
+/* The mark takes the place of the paragraph it explains. Sized and coloured to
+   read as an affordance rather than as content. */
+.hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  margin-left: 5px;
+  flex: none;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  font-size: 9px;
+  font-style: italic;
+  line-height: 1;
+  color: var(--fg-muted);
+  cursor: help;
+  vertical-align: middle;
+}
+
+.hint:hover,
+.hint:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.hint-warn {
+  font-style: normal;
+  font-weight: 700;
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
 .slider-row {
   display: grid;
   grid-template-columns: 40px 1fr 76px;
@@ -654,6 +687,89 @@ select {
 .error-text { color: var(--danger); }
 
 .warn-text { color: var(--warn); }
+
+/* The layer name is a button so it can be clicked to rename, but it should not
+   look like one until you are near it. */
+.result-name {
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  cursor: text;
+}
+
+.result-name:hover { text-decoration: underline dotted var(--fg-muted); }
+
+/* Hover provenance. Fixed rather than absolute so the sidebar's scroll
+   container cannot clip it, and above every panel. */
+.prov-popup {
+  position: fixed;
+  z-index: 60;
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: 9px 11px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: 4px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.prov-line {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.prov-key { color: var(--fg-muted); flex: none; }
+
+.prov-steps-title {
+  margin: 8px 0 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.prov-step + .prov-step {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+}
+
+.prov-step-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  justify-content: space-between;
+}
+
+.prov-tool { color: var(--accent); font-size: 10px; }
+
+.prov-desc { margin-top: 2px; }
+
+.prov-settings {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+
+.prov-settings li {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.prov-found {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  margin-top: 4px;
+}
 
 /* ── Label tree ──────────────────────────────────────────────────────────── */
 

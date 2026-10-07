@@ -451,6 +451,42 @@
           "type": "string",
           "format": "date-time"
         },
+        "stages": {
+          "type": "array",
+          "description": "One entry per stage that was asked to run, in order, recorded before it ran so a failure is still accounted for. This is what makes an exported mesh traceable back to the tool that produced it.",
+          "items": {
+            "type": "object",
+            "required": [
+              "op"
+            ],
+            "additionalProperties": true,
+            "properties": {
+              "op": {
+                "type": "string"
+              },
+              "params": {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "tool": {
+                "type": "string",
+                "description": "The named software that ran, or a dash when it is part of the private backend."
+              },
+              "algorithm": {
+                "type": "string",
+                "description": "The general approach, not the implementation."
+              },
+              "notes": {
+                "type": "string"
+              },
+              "duration_ms": {
+                "type": "integer"
+              }
+            }
+          }
+        },
         "duration_ms": {
           "type": "integer"
         }

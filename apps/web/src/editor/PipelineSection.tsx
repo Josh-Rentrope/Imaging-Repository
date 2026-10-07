@@ -1,4 +1,5 @@
 import { Op, type Stage } from '../lib/types'
+import { Info } from './Info'
 import { LabelTree } from './LabelTree'
 
 /**
@@ -215,11 +216,11 @@ export function PipelineSection({
                 onChange={(labels) => onParamsChange({ ...params, labels })}
               />
               {extracting > MASS_EXTRACTION_THRESHOLD && (
-                // Surfacing many structures costs a marching-cubes pass each,
-                // and a full `total` segmentation is 117 of them.
+                // A warning, not a note: it changes what the operator should do.
+                // Surfacing many structures costs a marching-cubes pass each, and
+                // a full `total` segmentation is 117 of them.
                 <p className="popover-hint warn-text" style={{ margin: '4px 0 6px' }}>
-                  {extracting} structures. That is one surface per structure and can take
-                  minutes — narrowing it down is much quicker.
+                  {extracting} structures — one surface each, which can take minutes.
                 </p>
               )}
             </>
@@ -253,9 +254,14 @@ export function PipelineSection({
                 />
               </label>
               <p className="popover-hint" style={{ margin: '2px 0 6px' }}>
-                {valueRange
-                  ? `In the volume's units — Hounsfield for a CT. Range ${Math.round(valueRange[0])} … ${Math.round(valueRange[1])}.`
-                  : 'Load a volume to set this in real units.'}
+                {valueRange ? `HU, ${Math.round(valueRange[0])} … ${Math.round(valueRange[1])}` : 'load a volume'}
+                <Info
+                  text={
+                    valueRange
+                      ? `In the volume's own units — Hounsfield for a CT. This series spans ${Math.round(valueRange[0])} to ${Math.round(valueRange[1])}.`
+                      : 'Load a volume and this becomes settable in the data’s real units.'
+                  }
+                />
               </p>
             </>
           )}
@@ -273,9 +279,14 @@ export function PipelineSection({
             <span className="slider-value mono">{params.stride}×</span>
           </label>
           <p className="popover-hint" style={{ margin: '2px 0 0' }}>
-            {wantsMask
-              ? 'Subsamples the mask before extraction. Higher is faster and coarser, and every vertex still carries its label.'
-              : 'Voxel subsampling. Higher is faster and coarser — useful for finding the right threshold before extracting at full resolution.'}
+            subsamples the input before extraction
+            <Info
+              text={
+                wantsMask
+                  ? 'Subsamples the mask before extraction. Higher is faster and coarser, and every vertex still carries its label. This is coarser than simplifying the finished surface, because a thin structure can vanish between sampled voxels.'
+                  : 'Voxel subsampling. Higher is faster and coarser — useful for finding the right threshold before extracting at full resolution.'
+              }
+            />
           </p>
 
           <label className="slider-row" style={{ marginTop: 6 }}>

@@ -54,6 +54,22 @@ class LocalStorage:
         path.write_bytes(data)
         return self.ref(key)
 
+    def remove_tree(self, key: str) -> int:
+        """Delete everything under a key. Returns how many files went.
+
+        A deletion that leaves the bytes behind is not a deletion — it is a
+        hidden file that reappears the moment something indexes the directory.
+        """
+        path = self._path(key)
+        if not path.exists():
+            return 0
+        if path.is_dir():
+            count = sum(1 for entry in path.rglob("*") if entry.is_file())
+            shutil.rmtree(path, ignore_errors=True)
+            return count
+        path.unlink(missing_ok=True)
+        return 1
+
     def get(self, ref: str) -> bytes:
         path = self._path(self._key_from_ref(ref))
         if not path.is_file():

@@ -84,12 +84,52 @@ export const api = {
     ),
   getJob: (id: string) => request<Job>(`/jobs/${id}`),
 
+  /** Name a result. Stored on the job, so it survives a reload. */
+  renameJob: (id: string, name: string | null) =>
+    request<Job>(`/jobs/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    }),
+
+  /** Remove a result and the geometry it produced. */
+  deleteJob: (id: string) =>
+    request<void>(`/jobs/${id}`, { method: 'DELETE' }),
+
   /** What a segmenter can find. Answered without running it. */
   segmenterClasses: (task = 'total') =>
     request<SegmenterClasses>(`/segmenter/classes?task=${encodeURIComponent(task)}`),
 
   /** What the Image View can show for a source. */
   listImages: (sourceId: string) => request<SourceImages>(`/sources/${sourceId}/images`),
+
+  /**
+   * Selected results as a zip.
+   *
+   * Returns the body rather than going through `request`, which parses JSON —
+   * this is an archive and reading it as text would corrupt it.
+   */
+  exportResults: async (body: {
+    result_ids: string[]
+    format: string
+    include_labels: boolean
+  }): Promise<Blob> => {
+    const response = await fetch(`${BASE}/exports`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!response.ok) {
+      let detail = `${response.status} ${response.statusText}`
+      try {
+        detail = (await response.json()).detail ?? detail
+      } catch {
+        // A non-JSON error body is not worth a second failure.
+      }
+      throw new Error(detail)
+    }
+    return response.blob()
+  },
   submitJob: (body: JobCreate) =>
     request<Job>('/jobs', {
       method: 'POST',

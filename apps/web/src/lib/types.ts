@@ -169,6 +169,17 @@ export interface ResultEnvelope {
     backend: string
     started_at?: string
     duration_ms?: number
+    /** What ran at each stage, recorded so a result can be traced back. */
+    stages?: {
+      op: string
+      params?: Record<string, unknown> | null
+      tool?: string
+      /** One sentence on what the step does, shown on hover rather than in the manifest. */
+      description?: string
+      algorithm?: string
+      notes?: string
+      duration_ms?: number
+    }[]
     [key: string]: unknown
   }
 }
@@ -178,6 +189,9 @@ export interface Job {
   status: JobStatus
   ops: string[]
   backend: string | null
+  /** What the operator calls this result. Null means the derived label. */
+  name?: string | null
+  source_id?: string | null
   created_at: string
   finished_at: string | null
   result: ResultEnvelope | null
@@ -187,6 +201,8 @@ export interface Job {
 
 export interface JobCreate {
   stages: Stage[]
+  /** Which workflow this is being run as, recorded on the job. */
+  workflow?: string
   capture?: Record<string, unknown> | null
   backend?: string | null
   allow_diagnostic?: boolean

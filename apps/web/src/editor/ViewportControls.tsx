@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 
+import { Info } from './Info'
+
 import {
   anyPlaneEnabled,
   AXIS_COLORS,
@@ -186,8 +188,8 @@ export function ViewportControls({
         {() => (
           <>
             <p className="popover-hint">
-              A plane clips away everything on one side. Off by default so the canvas stays free
-              for orbiting.
+              planes
+              <Info text="A plane clips away everything on one side, so you can see into the volume. Off by default, which keeps the canvas free for orbiting. A plane affects the volume always and a surface only if that result is marked ✂." />
             </p>
             {AXES.map((axis) => {
               const plane = settings.planes[axis]
@@ -275,8 +277,8 @@ export function ViewportControls({
             </div>
 
             <p className="popover-hint">
-              Values below the low threshold are dropped. On a CT the raw values are Hounsfield
-              units, so bone sits around 300 and above.
+              density window
+              <Info text="Values below the low threshold are dropped and those above the high one are capped, unless the band-pass toggle takes them back to nothing. On a CT the raw values are Hounsfield units, so bone sits around 300 and above." />
             </p>
 
             <div className="controls" style={{ marginBottom: 8 }}>
@@ -324,8 +326,8 @@ export function ViewportControls({
               <span className="field-label">cut above high</span>
             </label>
             <p className="popover-hint" style={{ margin: '0 0 4px' }}>
-              Off, everything denser than the high value keeps peak opacity — enamel, metal and
-              restorations then sit in front of the bone.
+              band-pass
+              <Info text="Drop opacity again above the high value. Left off, everything denser than it keeps peak opacity, so enamel, metal and restorations sit in front of the bone." />
             </p>
 
             <div className="plane-block" style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid var(--border)' }}>
@@ -339,8 +341,8 @@ export function ViewportControls({
                 suffix={`${settings.opacityUnitDistance.toFixed(2)}mm`}
               />
               <p className="popover-hint" style={{ margin: '4px 0 0' }}>
-                Distance over which opacity accumulates. Smaller makes the volume look solid,
-                larger thins it out. This is usually the fastest fix for “everything is opaque”.
+                opacity distance
+                <Info text="The distance over which opacity accumulates along a ray. Smaller makes the volume look solid, larger thins it out — and it is usually the fastest fix for “everything is opaque”. Only the ratio to the sample distance matters." />
               </p>
             </div>
 

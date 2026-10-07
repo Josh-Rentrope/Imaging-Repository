@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import get_settings
 from .jobs import JobStore
 from .pipeline import BackendRegistry
-from .routers import artifacts, health, jobs, segmenter, sources
+from .routers import artifacts, exports, health, jobs, segmenter, sources
 from .sources import SourceStore
 from .storage import LocalStorage
 
@@ -32,7 +32,9 @@ async def lifespan(app: FastAPI):
         preference=settings.backend,
         source_store=app.state.source_store,
     )
-    app.state.job_store = JobStore(app.state.registry, data_dir=settings.data_dir)
+    app.state.job_store = JobStore(
+        app.state.registry, data_dir=settings.data_dir, storage=app.state.storage
+    )
     yield
 
 
@@ -59,6 +61,7 @@ def create_app() -> FastAPI:
     app.include_router(jobs.router)
     app.include_router(sources.router)
     app.include_router(artifacts.router)
+    app.include_router(exports.router)
 
     return app
 

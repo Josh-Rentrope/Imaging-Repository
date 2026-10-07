@@ -1132,3 +1132,196 @@ def test_the_fixture_advertises_the_new_stages(client):
     caps = client.get("/capabilities").json()
     fixture = next(b for b in caps["backends"] if b["backend"] == "fixture")
     assert {"estimate_poses", "px2tooth"} <= set(fixture["ops"])
+
+
+# ── exporting ──────────────────────────────────────────────────────────────
+
+
+def _export(client, result_ids, **body):
+    return client.post(
+        "/exports", json={"result_ids": result_ids, "format": "stl", **body}
+    )
+
+
+def test_an_export_carries_the_geometry_and_how_it_was_made(client):
+    """The manifest is the point of the exercise, not a courtesy.
+
+    A mesh separated from the record of how it was produced is a shape of
+    unknown scale made by an unknown process, and it looks perfectly usable.
+    """
+    job = run(client, FULL_PIPELINE, RGBD_CAPTURE)
+    response = _export(client, [job["job_id"]])
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "application/zip"
+
+    archive = zipfile.ZipFile(io.BytesIO(response.content))
+    names = archive.namelist()
+    assert any(name.endswith(".stl") for name in names)
+    assert "manifest.json" in names
+
+    manifest = json.loads(archive.read("manifest.json"))
+    assert manifest["manifest_version"] == "1.0"
+    assert manifest["runs"][0]["result_id"] == job["result"]["result_id"]
+
+    stages = manifest["runs"][0]["stages"]
+    assert [stage["op"] for stage in stages] == ["rectify", "reconstruct", "segment", "measure"]
+    # Every stage has to name what ran, or the record answers nothing.
+    assert all(stage["tool"] and stage["algorithm"] for stage in stages)
+    assert manifest["runs"][0]["scale"]["verified"] is True
+
+
+def test_exported_stl_is_readable_and_keeps_the_mesh(client):
+    """A binary STL is a header, a count, and 50 bytes per triangle.
+
+    Getting the record layout wrong produces a file that is exactly the right
+    size and opens as garbage, so the count and the size are checked together.
+    """
+    source = upload_blocky_series(client)
+    job = run(
+        client,
+        [{"op": "iso_surface", "params": {"threshold": 500}}],
+        {"source_id": source["source_id"]},
+    )
+
+    archive = zipfile.ZipFile(io.BytesIO(_export(client, [job["job_id"]]).content))
+    name = next(n for n in archive.namelist() if n.endswith(".stl"))
+    blob = archive.read(name)
+
+    assert len(blob) >= 84
+    triangles = struct.unpack("<I", blob[80:84])[0]
+    assert len(blob) == 84 + triangles * 50
+    assert triangles > 0
+
+    # Positions are finite and sit inside the volume's own bounds.
+    verts = np.frombuffer(blob[84:], dtype=np.uint8).reshape(triangles, 50)
+    points = verts[:, 12:48].copy().view("<f4").reshape(-1, 3)
+    assert np.isfinite(points).all()
+    bounds = job["result"]["geometry"]["bounds"]
+    assert points[:, 0].min() >= bounds[0] - 1 and points[:, 0].max() <= bounds[1] + 1
+
+
+def test_obj_is_one_based_indexed(client):
+    """Zero-based indices load as an empty scene, which is the usual failure."""
+    job = run(client, FULL_RECONSTRUCT := [{"op": "reconstruct"}], RGBD_CAPTURE)
+    archive = zipfile.ZipFile(
+        io.BytesIO(_export(client, [job["job_id"]], format="obj").content)
+    )
+    obj = archive.read(next(n for n in archive.namelist() if n.endswith(".obj"))).decode()
+
+    faces = [ln for ln in obj.splitlines() if ln.startswith("f ")]
+    assert faces, "no faces in the OBJ"
+    assert min(int(v) for ln in faces for v in ln.split()[1:]) >= 1
+
+    vertices = [ln for ln in obj.splitlines() if ln.startswith("v ")]
+    highest = max(int(v) for ln in faces for v in ln.split()[1:])
+    assert highest <= len(vertices)
+
+
+def test_labels_travel_with_the_mesh_when_asked_for(client, monkeypatch):
+    """Re-encoding preserves vertex order, so the sidecar still lines up."""
+    job = run_labelled_surface(client, monkeypatch, simplify=0)
+    archive = zipfile.ZipFile(
+        io.BytesIO(_export(client, [job["job_id"]], include_labels=True).content)
+    )
+    names = archive.namelist()
+    assert any(n.endswith("labels.bin") for n in names)
+    assert any(n.endswith("labels.json") for n in names)
+
+    manifest = json.loads(archive.read("manifest.json"))
+    mesh = next(f for f in manifest["files"] if f["name"].endswith(".stl"))
+
+    # The label file is described on the mesh it belongs to, not in an entry of
+    # its own — an array of ints with no mesh is an array of ints.
+    assert mesh["label_file"]["bin"] in names
+    assert len(archive.read(mesh["label_file"]["bin"])) == mesh["vertices"] * 4
+
+    # And the names travel even without the array, because they are what make
+    # the mesh interpretable.
+    assert mesh["labels"]["legend"] == {"1": "rib_left_4", "2": "rib_left_5"}
+    assert set(mesh["labels"]["counts"]) == {"1", "2"}
+
+
+def test_an_export_refuses_what_it_cannot_describe(client):
+    """Better a clear refusal than an archive with no manifest in it."""
+    assert _export(client, ["no-such-result"]).status_code == 404
+    job = submit(client, [{"op": "does_not_exist"}])
+    assert settle(client, job)["status"] == "failed"
+    assert _export(client, [job["job_id"]]).status_code == 409
+
+    good = run(client, [{"op": "reconstruct"}], RGBD_CAPTURE)
+    assert _export(client, [good["job_id"]], format="fbx").status_code == 400
+
+
+def test_the_manifest_states_the_model_the_labels_came_from(client, monkeypatch):
+    """A label id means nothing on its own.
+
+    Id 5 is one structure under the `total` task and a different one under
+    `teeth`, so the legend is only interpretable alongside the model that
+    produced it.
+    """
+    job = run_labelled_surface(client, monkeypatch)
+    archive = zipfile.ZipFile(io.BytesIO(_export(client, [job["job_id"]]).content))
+    manifest = json.loads(archive.read("manifest.json"))
+
+    run_entry = manifest["runs"][0]
+    assert run_entry["model_version"] == job["result"]["model_version"]
+    assert run_entry["segmentation"]["kind"] == "volumetric"
+    assert {c["name"] for c in run_entry["segmentation"]["classes"]} == {
+        "rib_left_4",
+        "rib_left_5",
+    }
+    assert manifest["source"]["source_id"] is not None
+
+
+def test_the_manifest_carries_no_advice(client):
+    """It describes what was made, not what to think of it.
+
+    Guidance belongs in the interface, where it is read once and can be
+    updated. In the manifest it rides along in every archive ever produced,
+    still asserting whatever we believed on the day it was written.
+    """
+    job = run(client, [{"op": "reconstruct"}], RGB_NO_FIDUCIAL)
+    archive = zipfile.ZipFile(io.BytesIO(_export(client, [job["job_id"]]).content))
+    manifest = json.loads(archive.read("manifest.json"))
+
+    def keys_of(node) -> list[str]:
+        if isinstance(node, dict):
+            return [k for k in node] + [k for v in node.values() for k in keys_of(v)]
+        if isinstance(node, list):
+            return [k for item in node for k in keys_of(item)]
+        return []
+
+    keys = keys_of(manifest)
+    assert "units_note" not in keys
+    # A prose field is where advice gets back in, so there is deliberately none.
+    assert "notes" not in keys
+
+    # The fact stays; the sentence about what it implies does not.
+    assert manifest["runs"][0]["scale"] == {"verified": False, "source": "unknown"}
+
+
+def test_the_workflow_travels_with_the_result(client):
+    """Two stages under different workflows are different pipelines.
+
+    The ops alone do not say which was intended, so the manifest has to carry
+    the choice — and it has to survive the round trip through the store.
+    """
+    job = run(client, [{"op": "reconstruct"}], RGBD_CAPTURE, workflow="Photographs")
+    assert job["workflow"] == "Photographs"
+    assert client.get(f"/jobs/{job['job_id']}").json()["workflow"] == "Photographs"
+
+    archive = zipfile.ZipFile(io.BytesIO(_export(client, [job["job_id"]]).content))
+    manifest = json.loads(archive.read("manifest.json"))
+    assert manifest["runs"][0]["workflow"] == "Photographs"
+
+
+def test_every_stage_describes_itself(client):
+    """The hover shows one sentence per step, so every stage must have one."""
+    from app.pipeline.fixture import _IMPLEMENTATIONS
+    from app.pipeline.interfaces import Op
+
+    for op in Op:
+        entry = _IMPLEMENTATIONS.get(op)
+        assert entry is not None, f"{op} has no implementation record"
+        assert entry.get("description"), f"{op} has no description"
+        assert entry["description"].endswith("."), f"{op}'s description is not a sentence"

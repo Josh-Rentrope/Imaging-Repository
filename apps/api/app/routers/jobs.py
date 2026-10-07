@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 
 from ..config import Settings
 from ..deps import get_config, get_job_store
@@ -44,3 +45,38 @@ def get_job(job_id: str, store: Annotated[JobStore, Depends(get_job_store)]) -> 
     if job is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id!r}")
     return job
+
+
+class JobRename(BaseModel):
+    #: `None` clears the operator's name and falls back to the derived one.
+    name: str | None = None
+
+
+@router.patch("/{job_id}", response_model=Job)
+def rename_job(
+    job_id: str,
+    body: JobRename,
+    store: Annotated[JobStore, Depends(get_job_store)],
+) -> Job:
+    """Give a result the name the operator calls it.
+
+    Stored on the job rather than kept in the page, so a layer renamed now is
+    still called that after a reload, in another tab, or on another machine.
+    """
+    name = (body.name or "").strip() or None
+    updated = store.rename(job_id, name)
+    if updated is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id!r}")
+    return updated
+
+
+@router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_job(job_id: str, store: Annotated[JobStore, Depends(get_job_store)]) -> None:
+    """Remove a result and the geometry it produced.
+
+    Both, or the deleted layer comes back: the page re-reads the server's list
+    on load, so anything still recorded here reappears as though the delete had
+    never happened.
+    """
+    if store.delete(job_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no job {job_id!r}")

@@ -12,6 +12,7 @@ import {
 } from '../editor/PipelineSection'
 import { ResultsSection, type ResultView } from '../editor/ResultsSection'
 import { SourceSection } from '../editor/SourceSection'
+import { ExportSection } from '../editor/ExportSection'
 import { MainPanel } from '../editor/MainPanel'
 import { surfaceColor } from '../editor/viewportSettings'
 import { api } from '../lib/api'
@@ -59,7 +60,9 @@ function buildCapture(source: SourceSummary, hasDepth: boolean, hasFiducial: boo
   }
 }
 
+/** What to call a result: the operator's name if there is one, else the derived label. */
 function labelFor(ops: string[], job: Job): string {
+  if (job.name) return job.name
   if (ops.length === 1 && ops[0] === Op.ISO_SURFACE) {
     const threshold = job.result?.geometry?.threshold
     return threshold != null ? `Surface @ ${Math.round(threshold)}` : 'Surface'
@@ -273,6 +276,9 @@ export default function EditorRoute() {
     try {
       const submitted = await api.submitJob({
         stages,
+        // Recorded on the job, not just held here: two stages under different
+        // workflows are different pipelines, and the ops alone do not say which.
+        workflow: workflowFor(workflow).label,
         capture: buildCapture(activeSource, hasDepth, hasFiducial),
       })
 
@@ -324,6 +330,66 @@ export default function EditorRoute() {
       void follow(sourceId, entry.id)
     }
   }, [results, sourceId])
+
+  /**
+   * Deletions and renames go to the server, not just to this page.
+   *
+   * The page re-reads the result list on load, so anything only removed from
+   * local state comes back on the next refresh as though nothing happened. The
+   * row goes either way: a failed request is not a reason to make the operator
+   * click twice, and the next load will put it back if the delete really did
+   * not take.
+   */
+  async function remove(id: string) {
+    updateResults(sourceKeyFor(id), (list) => list.filter((entry) => entry.id !== id))
+    try {
+      await api.deleteJob(id)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
+  async function clearAll() {
+    if (!sourceId) return
+    const going = results.map((entry) => entry.id)
+    updateResults(sourceId, () => [])
+    try {
+      await Promise.all(going.map((id) => api.deleteJob(id)))
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
+  async function rename(id: string, name: string | null) {
+    // Shown straight away; the server's answer is what survives a reload.
+    updateResults(sourceKeyFor(id), (list) =>
+      list.map((entry) =>
+        entry.id === id
+          ? { ...entry, job: { ...entry.job, name }, label: name ?? labelFor(entry.job.ops, { ...entry.job, name: null }) }
+          : entry,
+      ),
+    )
+    try {
+      const updated = await api.renameJob(id, name)
+      updateResults(sourceKeyFor(id), (list) =>
+        list.map((entry) =>
+          entry.id === id
+            ? { ...entry, job: updated, label: labelFor(updated.ops, updated) }
+            : entry,
+        ),
+      )
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
+  /** Which source a result belongs to, so an update lands in the right list. */
+  function sourceKeyFor(id: string): string {
+    for (const [key, list] of Object.entries(resultsBySource)) {
+      if (list.some((entry) => entry.id === id)) return key
+    }
+    return sourceId ?? ''
+  }
 
   /**
    * Poll one job to completion, updating its row in place.
@@ -398,6 +464,8 @@ export default function EditorRoute() {
           </div>
         )}
 
+        <ExportSection results={results} />
+
         <PipelineSection
           running={inFlight.length}
           submitting={submitting}
@@ -443,6 +511,8 @@ export default function EditorRoute() {
         {sourceId && (
           <ResultsSection
             results={results}
+            sourceKind={activeSource?.kind ?? null}
+            workflow={workflowFor(workflow).label}
             onToggleVisible={(id) =>
               updateResults(sourceId, (list) =>
                 list.map((r) => (r.id === id ? { ...r, visible: !r.visible } : r)),
@@ -453,10 +523,9 @@ export default function EditorRoute() {
                 list.map((r) => (r.id === id ? { ...r, clipped: !r.clipped } : r)),
               )
             }
-            onRemove={(id) =>
-              updateResults(sourceId, (list) => list.filter((r) => r.id !== id))
-            }
-            onClear={() => updateResults(sourceId, () => [])}
+            onRemove={(id) => void remove(id)}
+            onRename={(id, name) => void rename(id, name)}
+            onClear={() => void clearAll()}
           />
         )}
       </aside>
