@@ -15,6 +15,10 @@ export const Op = {
   ISOLATE_VOLUME: 'isolate_volume',
   ISO_SURFACE: 'iso_surface',
   DETECT_CARIES: 'detect_caries',
+  /** Camera poses, from the device tracker or solved from the images. */
+  ESTIMATE_POSES: 'estimate_poses',
+  /** Teeth from a single panoramic radiograph. */
+  PX2TOOTH: 'px2tooth',
 } as const
 
 export const DIAGNOSTIC_OPS = new Set<string>([Op.DETECT_CARIES])

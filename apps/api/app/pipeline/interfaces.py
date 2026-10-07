@@ -25,6 +25,13 @@ class Op(StrEnum):
     ISOLATE_VOLUME = "isolate_volume"
     ISO_SURFACE = "iso_surface"
     DETECT_CARIES = "detect_caries"
+    #: Poses for a set of photographs, from the device or from structure-from-
+    #: motion. Separate from `reconstruct` because it is a different kind of
+    #: answer — camera geometry, not tissue — and because on a phone it is
+    #: usually already known, in which case this stage is skipped rather than run.
+    ESTIMATE_POSES = "estimate_poses"
+    #: Teeth from a single panoramic radiograph.
+    PX2TOOTH = "px2tooth"
 
 
 class BackendId(StrEnum):

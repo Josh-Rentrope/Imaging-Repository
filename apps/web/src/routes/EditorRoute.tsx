@@ -4,9 +4,10 @@ import {
   buildStages,
   DEFAULT_SIMPLIFY_MM,
   DEFAULT_THRESHOLD,
-  OPS_BY_KIND,
+  DEFAULT_WORKFLOW,
   PipelineSection,
   SURFACE_AFTER_MASK,
+  workflowFor,
   type PipelineParams,
 } from '../editor/PipelineSection'
 import { ResultsSection, type ResultView } from '../editor/ResultsSection'
@@ -76,6 +77,7 @@ export default function EditorRoute() {
     simplify: DEFAULT_SIMPLIFY_MM,
     labels: null,
   })
+  const [workflow, setWorkflow] = useState('ct')
   const [hasDepth, setHasDepth] = useState(false)
   const [hasFiducial, setHasFiducial] = useState(false)
 
@@ -107,7 +109,10 @@ export default function EditorRoute() {
 
   const sourceId = activeSource?.source_id ?? null
   const results = sourceId ? (resultsBySource[sourceId] ?? []) : []
-  const ops = activeSource ? OPS_BY_KIND[activeSource.kind] : []
+  // What can be done here is a property of the data, and the source kind only
+  // suggests a default: a panoramic radiograph and a set of intraoral
+  // photographs are both image uploads and want different pipelines.
+  const ops = activeSource ? workflowFor(workflow).ops : []
   const valueRange = volume?.header.value_range ?? null
 
   // The volume is fetched here rather than in the viewport because the pipeline
@@ -134,11 +139,25 @@ export default function EditorRoute() {
   // Changing source resets the run form and pre-selects that kind's operations.
   useEffect(() => {
     setError(null)
-    setSelectedOps(activeSource ? OPS_BY_KIND[activeSource.kind] : [])
+    const suggested = activeSource ? DEFAULT_WORKFLOW[activeSource.kind] : 'ct'
+    setWorkflow(suggested)
+    setSelectedOps(activeSource ? workflowFor(suggested).ops : [])
     // Structure names picked for one scan generally do not exist in another,
     // and the failure would only surface once the job had run.
     setParams((current) => ({ ...current, labels: null }))
   }, [sourceId, activeSource?.kind])
+
+  // Changing workflow changes what the pipeline can do, so the ticks follow it
+  // rather than leaving stages selected that this workflow does not offer.
+  const changedWorkflow = useRef(true)
+  useEffect(() => {
+    if (changedWorkflow.current) {
+      changedWorkflow.current = false
+      return
+    }
+    setSelectedOps(workflowFor(workflow).ops)
+    setParams((current) => ({ ...current, labels: null }))
+  }, [workflow])
 
   // What the segmenter can find, asked for on its own.
   //
@@ -383,6 +402,8 @@ export default function EditorRoute() {
           running={inFlight.length}
           submitting={submitting}
           ops={ops}
+          workflow={workflow}
+          onWorkflowChange={setWorkflow}
           selected={selectedOps}
           onToggle={(op) =>
             setSelectedOps((current) => {

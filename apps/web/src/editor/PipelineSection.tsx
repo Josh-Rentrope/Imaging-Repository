@@ -1,13 +1,58 @@
 import { Op, type Stage } from '../lib/types'
 import { LabelTree } from './LabelTree'
 
-/** Operations offered per source kind. A volume and an image set need different work. */
-export const OPS_BY_KIND: Record<'dicom' | 'images', string[]> = {
-  // `segment` comes before `iso_surface` because the two chain: stages in one
-  // job share an envelope, and a surface extracted after a segmentation follows
-  // the mask's label boundaries instead of a single density threshold.
-  dicom: [Op.ISOLATE_VOLUME, Op.SEGMENT, Op.ISO_SURFACE],
-  images: [Op.RECTIFY, Op.RECONSTRUCT, Op.SEGMENT, Op.MEASURE],
+/**
+ * What kind of data this is, and therefore what can be done to it.
+ *
+ * Workflows rather than source kinds, because one kind of upload can be more
+ * than one thing: a single flat radiograph and a set of intraoral photographs
+ * both arrive as image files and want completely different pipelines. Which
+ * stages are available is a property of the data, so it is chosen explicitly
+ * rather than inferred from a file extension.
+ */
+export interface Workflow {
+  id: string
+  label: string
+  /** In the order the stages must run. `buildStages` sorts the ticks to match. */
+  ops: string[]
+  hint: string
+}
+
+export const WORKFLOWS: Workflow[] = [
+  {
+    id: 'ct',
+    label: 'CT volume',
+    // `segment` precedes `iso_surface` because the two chain: stages in one job
+    // share an envelope, so a surface extracted after a segmentation follows
+    // the mask's label boundaries instead of a single density threshold.
+    ops: [Op.ISOLATE_VOLUME, Op.SEGMENT, Op.ISO_SURFACE],
+    hint: 'A stack of slices assembled into a volume, then segmented.',
+  },
+  {
+    id: 'photos',
+    label: 'Photographs',
+    // Poses first, because everything after them is expressed in camera
+    // geometry. Deliberately no fixed number of views: a phone that tracks its
+    // own motion supplies them, and anything else has them solved.
+    ops: [Op.ESTIMATE_POSES, Op.RECTIFY, Op.RECONSTRUCT, Op.SEGMENT, Op.MEASURE],
+    hint: 'Any number of photographs from any angles. Poses come from the device tracker when there is one, and are solved from the images otherwise.',
+  },
+  {
+    id: 'panoramic',
+    label: 'Panoramic X-ray',
+    ops: [Op.PX2TOOTH, Op.SEGMENT, Op.MEASURE],
+    hint: 'One flat projection, so the buccolingual extent is inferred rather than observed.',
+  },
+]
+
+/** What an upload most likely is, before anyone says otherwise. */
+export const DEFAULT_WORKFLOW: Record<'dicom' | 'images', string> = {
+  dicom: 'ct',
+  images: 'photos',
+}
+
+export function workflowFor(id: string): Workflow {
+  return WORKFLOWS.find((entry) => entry.id === id) ?? WORKFLOWS[0]
 }
 
 const OP_HINTS: Record<string, string> = {
@@ -17,6 +62,9 @@ const OP_HINTS: Record<string, string> = {
   [Op.RECONSTRUCT]: 'Build a surface from the capture',
   [Op.SEGMENT]: 'Find structures — organs in a volume, teeth in a capture',
   [Op.MEASURE]: 'Arch and tooth measurements',
+  [Op.ESTIMATE_POSES]:
+    'Camera positions for the photographs — reported by the device when it tracks its own motion, solved from the images otherwise',
+  [Op.PX2TOOTH]: 'Teeth from a single panoramic radiograph',
 }
 
 export const DEFAULT_THRESHOLD = 300
@@ -85,6 +133,8 @@ export function buildStages(
 
 export function PipelineSection({
   ops,
+  workflow,
+  onWorkflowChange,
   selected,
   onToggle,
   params,
@@ -97,6 +147,8 @@ export function PipelineSection({
   submitting,
 }: {
   ops: string[]
+  workflow: string
+  onWorkflowChange: (id: string) => void
   selected: string[]
   onToggle: (op: string) => void
   params: PipelineParams
@@ -124,6 +176,21 @@ export function PipelineSection({
   return (
     <div className="section">
       <h2 className="section-title">Pipeline</h2>
+
+      <label className="field" style={{ marginBottom: 6 }}>
+        <span className="field-label">workflow</span>
+        <select
+          value={workflow}
+          onChange={(event) => onWorkflowChange(event.target.value)}
+          title={workflowFor(workflow).hint}
+        >
+          {WORKFLOWS.map((entry) => (
+            <option key={entry.id} value={entry.id}>
+              {entry.label}
+            </option>
+          ))}
+        </select>
+      </label>
 
       {ops.length === 0 ? (
         <p className="muted" style={{ margin: 0 }}>

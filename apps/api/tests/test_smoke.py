@@ -1067,3 +1067,68 @@ def test_the_slice_spacing_is_not_scaled_twice(client):
         "x-slice-spacing-mm"
     ]
     assert float(header) == pytest.approx(listing["slice_spacing_mm"])
+
+
+# ── the two workflows that are not a CT volume ─────────────────────────────
+
+
+def test_poses_come_from_the_device_when_it_has_them(client):
+    """A phone that tracks its own motion must not pay for structure-from-motion.
+
+    Which source applies is a property of the capture, not a parameter: the
+    frame either carries a pose or it does not.
+    """
+    capture = {
+        **RGBD_CAPTURE,
+        "frames": [{"frame_id": 0, "pose": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]}],
+    }
+    result = run(client, [{"op": "estimate_poses"}], capture)["result"]
+    assert result["geometry"]["pose_source"] == "device"
+    assert result["geometry"]["poses_solved"] == 0
+    assert result["geometry"]["scale_known"] is True
+
+
+def test_poses_are_solved_when_the_capture_has_none(client):
+    """Ordinary photographs are not refused for lacking a tracker."""
+    result = run(client, [{"op": "estimate_poses"}], RGB_NO_FIDUCIAL)["result"]
+    assert result["geometry"]["pose_source"] == "sfm"
+    assert result["geometry"]["scale_known"] is False
+    assert any("no metric scale" in w for w in result["warnings"])
+
+
+def test_any_number_of_views_is_accepted(client):
+    """The five-view convention is a constraint of other people's pipelines.
+
+    Nothing here may require a particular count: a phone captures a video, and a
+    clinician uploads however many photographs they took.
+    """
+    for frames in (1, 3, 5, 17):
+        capture = {
+            **RGB_NO_FIDUCIAL,
+            "frames": [{"frame_id": i} for i in range(frames)],
+        }
+        result = run(client, [{"op": "estimate_poses"}], capture)["result"]
+        assert result["geometry"]["frames"] == frames
+
+
+def test_a_panoramic_reconstruction_says_what_it_cannot_know(client):
+    """One flat projection has no buccolingual extent to observe.
+
+    Reporting a depth that was never measured is the failure mode that matters
+    here, so the surface is produced and the limitation is stated with it.
+    """
+    job = run(client, [{"op": "px2tooth"}], {**RGB_NO_FIDUCIAL, "modality": "radiograph"})
+    assert job["status"] == "succeeded", job["error"]
+
+    result = job["result"]
+    assert result["ops"] == ["px2tooth"]
+    mesh = next(a for a in result["artifacts"] if a["kind"] == "mesh")
+    # No pixel spacing, so no millimetres to claim.
+    assert mesh["units"] == "arbitrary"
+    assert any("buccolingual" in w for w in result["warnings"])
+
+
+def test_the_fixture_advertises_the_new_stages(client):
+    caps = client.get("/capabilities").json()
+    fixture = next(b for b in caps["backends"] if b["backend"] == "fixture")
+    assert {"estimate_poses", "px2tooth"} <= set(fixture["ops"])

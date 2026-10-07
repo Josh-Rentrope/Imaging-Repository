@@ -69,6 +69,8 @@ class FixtureBackend:
             Op.ISOLATE_VOLUME: _isolate_volume,
             Op.ISO_SURFACE: _iso_surface,
             Op.DETECT_CARIES: _detect_caries,
+            Op.ESTIMATE_POSES: _estimate_poses,
+            Op.PX2TOOTH: _px2tooth,
         }
 
     def capabilities(self) -> Capabilities:
@@ -303,6 +305,93 @@ def _segment_synthetic(envelope: dict, params: dict) -> None:
         "instances": instances,
         "flags": ["crowding"] if abstentions else [],
     }
+
+
+def _estimate_poses(envelope: dict, params: dict, context: dict) -> None:
+    """Camera poses for a set of photographs.
+
+    Two sources, and which one applies is a property of the capture rather than
+    a choice here: a device tracker reports its own poses, and photographs
+    without them are solved for. The capture says which by whether it carries
+    poses already, so a phone never pays for structure-from-motion it does not
+    need — and a set of ordinary photos is not refused for lacking a tracker.
+    """
+    capture = context["capture"]
+    frames = capture.get("frames") or []
+    supplied = [frame for frame in frames if frame.get("pose")]
+
+    if supplied:
+        source, solved = "device", 0
+    else:
+        source, solved = "sfm", len(frames)
+
+    envelope["geometry"] = {
+        **(envelope.get("geometry") or {}),
+        "pose_source": source,
+        "frames": len(frames),
+        "poses_solved": solved,
+        # Nothing here is metric: a solved camera trajectory has scale only up to
+        # an unknown factor, which is why a fiducial or a depth sensor matters.
+        "scale_known": bool(supplied),
+    }
+    envelope["warnings"].append(
+        "Camera poses came from the device tracker."
+        if supplied
+        else "Camera poses were solved from the photographs alone, so the scene "
+        "has no metric scale until a fiducial fixes it."
+    )
+
+
+def _px2tooth(envelope: dict, params: dict, context: dict) -> None:
+    """Teeth from a single panoramic radiograph.
+
+    One flat projection, so what comes back is a surface inferred from it rather
+    than measured: the teeth are found along the arch, but their buccal and
+    lingual extent is not in the image and cannot be recovered from it. The
+    geometry is reported as a surface and the scale as unverified until a
+    fiducial says otherwise, because the pixel spacing of a panoramic is
+    frequently absent and a wrong millimetre here is a wrong treatment plan.
+    """
+    storage: LocalStorage = context["storage"]
+
+    # A panoramic is metrically unreliable in a way other radiographs are not.
+    # It is a curved-surface projection with magnification that varies across the
+    # arch, so a distance measured on it is not a distance in the mouth — and a
+    # pixel spacing, when the file even carries one, does not fix that. Downgraded
+    # here rather than in `_resolve_scale`, which is right about periapical films
+    # and wrong about this one thing.
+    envelope["scale"] = {"verified": False, "source": "unknown"}
+
+    verts, faces = build_dental_arch()
+    ref = storage.put(
+        f"artifacts/{envelope['result_id']}/panoramic-teeth.ply",
+        to_ply(verts, faces),
+    )
+    envelope["artifacts"].append(
+        {
+            "kind": "mesh",
+            "format": "ply",
+            "ref": ref,
+            "units": "arbitrary",
+            "vertices": int(len(verts)),
+            "triangles": int(len(faces)),
+        }
+    )
+    envelope["segmentation"] = {
+        "arch": params.get("arch", "both"),
+        "unassigned_region_pct": 62.0,
+        "instances": [],
+        "flags": [],
+        "kind": "fdi",
+    }
+    envelope["warnings"].append(
+        "Reconstructed from a single panoramic projection, so the buccolingual "
+        "extent is inferred rather than observed."
+    )
+    envelope["warnings"].append(
+        "A panoramic magnifies unevenly across the arch, so the geometry is "
+        "reported in arbitrary units and no measurements are derived from it."
+    )
 
 
 def _measure(envelope: dict, params: dict, context: dict) -> None:
