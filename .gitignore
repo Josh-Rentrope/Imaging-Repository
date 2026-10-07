@@ -1,0 +1,99 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Planning notes are deliberately NOT versioned here.
+#
+# WARNING: ignoring Notes/ means the notes have no history and no backup.
+# One bad `rm`, and the entire planning record is gone — same failure mode as
+# cherry-bridge. If they matter (they do), keep Notes/ inside a SEPARATE
+# private notes repo with its own remote, rather than leaving them untracked.
+# See Notes/00-README.md §Caveats.
+# ─────────────────────────────────────────────────────────────────────────────
+Notes/
+
+# ── Secrets ──────────────────────────────────────────────────────────────────
+# A secret in a repo is not a secret. Nothing here is ever committed.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets/
+credentials.json
+service-account*.json
+
+# ── Model artefacts ──────────────────────────────────────────────────────────
+# Weights never live in a git repo: they bloat it, and `git log` keeps them
+# forever even after deletion. They belong in a private registry, pulled by CI
+# and referenced by digest. See Notes/03-repo-and-ip-protection.md.
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+*.mlmodel
+*.mlpackage
+*.tflite
+*.engine
+*.trt
+models/
+weights/
+checkpoints/
+
+# ── Capture / patient data ───────────────────────────────────────────────────
+# Never commit real captures or anything derived from a patient. Staging and
+# tests use synthetic patients only.
+data/
+datasets/
+captures/
+samples/
+
+# Local dev object store (apps/api/.data): uploaded DICOM, generated meshes and
+# volumes. Real patient data lands here the moment anyone drags a real scan in,
+# so this must never be committed.
+.data/
+*.sav
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ── Node ─────────────────────────────────────────────────────────────────────
+node_modules/
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# ── Rust / Tauri (if a desktop shell is added) ───────────────────────────────
+src-tauri/target/
+target/
+
+# ── Native / CUDA build output ───────────────────────────────────────────────
+*.so
+*.dylib
+*.dll
+*.o
+*.obj
+
+# ── OS / editor ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# ── Local deploy state ───────────────────────────────────────────────────────
+# deploys.lock IS committed (it pins the model image digest).
+# Local overrides are not.
+deploys.local.*
+*.local.json

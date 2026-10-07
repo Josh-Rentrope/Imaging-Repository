@@ -1,0 +1,17 @@
+{
+  "name": "bone-viewer",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Orthodontic 3D reconstruction and radiograph platform (working name)",
+  "scripts": {
+    "web:dev": "npm --prefix apps/web run dev",
+    "web:build": "npm --prefix apps/web run build",
+    "web:typecheck": "npm --prefix apps/web run typecheck",
+    "web:install": "npm --prefix apps/web install",
+    "api:dev": "cd apps/api && uv run uvicorn app.main:app --reload --port 8787",
+    "api:install": "cd apps/api && uv sync"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
