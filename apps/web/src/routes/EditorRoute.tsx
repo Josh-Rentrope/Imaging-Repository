@@ -11,7 +11,7 @@ import {
 } from '../editor/PipelineSection'
 import { ResultsSection, type ResultView } from '../editor/ResultsSection'
 import { SourceSection } from '../editor/SourceSection'
-import { Viewport3D } from '../editor/Viewport3D'
+import { MainPanel } from '../editor/MainPanel'
 import { surfaceColor } from '../editor/viewportSettings'
 import { api } from '../lib/api'
 import {
@@ -351,7 +351,7 @@ export default function EditorRoute() {
 
   return (
     <div className="editor">
-      <Viewport3D
+      <MainPanel
         source={activeSource}
         volume={volume}
         results={results}

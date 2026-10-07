@@ -23,7 +23,7 @@ import vtkSTLReader from '@kitware/vtk.js/IO/Geometry/STLReader'
 import vtkGenericRenderWindow from '@kitware/vtk.js/Rendering/Misc/GenericRenderWindow'
 
 import { artifactUrl } from '../lib/api'
-import { intersectBox, intersectMesh, type Ray } from './raycast'
+import { intersectBox, intersectMesh, type Ray, type Visibility } from './raycast'
 import {
   AXIS_COLORS,
   backgroundHex,
@@ -347,6 +347,31 @@ function rayThrough(
   }
 }
 
+/**
+ * Visibility test for a surface's cutting planes, or undefined when they do not
+ * apply to it.
+ *
+ * A parked plane — one switched off — sits a full extent outside the data, so
+ * every point still passes it and no special case is needed for disabled axes.
+ */
+function clipVisibility(ctx: Ctx, clipped: boolean): Visibility | undefined {
+  if (!clipped) return undefined
+
+  const planes = AXES.map((axis) => ctx.planes[axis]).map((plane) => ({
+    normal: plane.getNormal() as ArrayLike<number>,
+    origin: plane.getOrigin() as ArrayLike<number>,
+  }))
+
+  return (x, y, z) =>
+    planes.every(
+      ({ normal, origin }) =>
+        normal[0] * (x - origin[0]) +
+          normal[1] * (y - origin[1]) +
+          normal[2] * (z - origin[2]) >=
+        0,
+    )
+}
+
 /** Positions and cells of a mesh, as vtk stores them. */
 interface MeshArrays {
   positions: ArrayLike<number>
@@ -369,6 +394,7 @@ function meshArrays(mapper: unknown): MeshArrays | null {
 /** Ray-cast the labelled meshes and report the nearest structure. */
 function selectAt(
   ctx: Ctx | null,
+  model: SceneModel,
   screenX: number,
   screenY: number,
   report: (selection: SceneSelection | null) => void,
@@ -412,9 +438,17 @@ function selectAt(
       continue
     }
 
-    const hit = intersectMesh(ray, arrays.positions, arrays.polys)
+    // Geometry the cutting planes have removed must not answer a click: it is
+    // not on screen, so picking it would name a structure the user cannot see.
+    const surface = model.surfaces.find((s) => s.id === id)
+    const hit = intersectMesh(
+      ray,
+      arrays.positions,
+      arrays.polys,
+      clipVisibility(ctx, surface?.clipped ?? false),
+    )
     if (!hit) {
-      skipped.push(`${label} (bounds hit, no triangle)`)
+      skipped.push(`${label} (bounds hit, no visible triangle)`)
       continue
     }
 
@@ -569,9 +603,13 @@ export function Scene({
   const [revision, setRevision] = useState(0)
 
   // The pick handlers are bound to the interactor once, at mount, so they
-  // cannot close over a prop that changes every render.
+  // cannot close over props that change every render.
   const onSelectRef = useRef(onSelect)
   onSelectRef.current = onSelect
+  // Read for each surface's clip flag, so a click ignores geometry the cutting
+  // planes have taken off the screen.
+  const modelRef = useRef(model)
+  modelRef.current = model
 
   const volumeKey = model.volume ? `${model.volume.headerRef}|${model.volume.binRef}` : ''
   const surfaceKey = model.surfaces.map((s) => `${s.id}:${s.meshRef}`).join(',')
@@ -620,7 +658,9 @@ export function Scene({
       const travelled = Math.hypot(x - start.x, y - start.y)
       if (travelled > CLICK_SLOP_PX * devicePixelScale(generic)) return
 
-      selectAt(ctxRef.current, x, y, (picked) => onSelectRef.current(picked))
+      selectAt(ctxRef.current, modelRef.current, x, y, (picked) =>
+        onSelectRef.current(picked),
+      )
     }
 
     const subscriptions = [

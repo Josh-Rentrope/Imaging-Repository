@@ -12,6 +12,7 @@ import type {
   Job,
   JobCreate,
   SegmenterClasses,
+  SourceImages,
   SourceSummary,
   VolumePayload,
 } from './types'
@@ -86,6 +87,9 @@ export const api = {
   /** What a segmenter can find. Answered without running it. */
   segmenterClasses: (task = 'total') =>
     request<SegmenterClasses>(`/segmenter/classes?task=${encodeURIComponent(task)}`),
+
+  /** What the Image View can show for a source. */
+  listImages: (sourceId: string) => request<SourceImages>(`/sources/${sourceId}/images`),
   submitJob: (body: JobCreate) =>
     request<Job>('/jobs', {
       method: 'POST',

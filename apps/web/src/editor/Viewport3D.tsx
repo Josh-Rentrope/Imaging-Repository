@@ -120,7 +120,7 @@ export function Viewport3D({
 }) {
   const [settings, setSettings] = useState<ViewportSettings>(DEFAULT_SETTINGS)
   const [selection, setSelection] = useState<SceneSelection | null>(null)
-  const viewportRef = useRef<HTMLElement>(null)
+  const viewportRef = useRef<HTMLDivElement>(null)
   const viewportSize = useElementSize(viewportRef)
 
   // Hidden results stay in the model: dropping them here would change the key
@@ -168,7 +168,7 @@ export function Viewport3D({
   const hasContent = model.volume !== null || model.surfaces.length > 0
 
   return (
-    <section className="viewport" ref={viewportRef}>
+    <div className="view-pane" ref={viewportRef}>
       <div className="viewport-overlay">
         <span className="tag">{source?.name ?? 'No source'}</span>
         <span style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
@@ -205,6 +205,6 @@ export function Viewport3D({
           <span className="tag mono">{latest.model_version}</span>
         </div>
       )}
-    </section>
+    </div>
   )
 }

@@ -994,3 +994,76 @@ def test_simplifying_keeps_every_vertex_labelled(client, monkeypatch):
     )
     assert len(values) == mesh["vertices"]
     assert set(np.unique(values).tolist()) == {1, 2}
+
+
+# ── the Image View ─────────────────────────────────────────────────────────
+
+
+def test_dicom_slices_are_listed_and_rendered(client):
+    """Slices come off the assembled volume, so the two views agree.
+
+    Listing the files instead would need its own sort, and any disagreement
+    about order between the slice strip and the 3D volume is a clinical bug.
+    """
+    source = upload_blocky_series(client, slices=6, rows=24, cols=24)
+
+    listing = client.get(f"/sources/{source['source_id']}/images").json()
+    assert listing["kind"] == "dicom"
+    assert listing["count"] == 6
+    assert [entry["index"] for entry in listing["images"]] == [0, 1, 2, 3, 4, 5]
+
+    response = client.get(f"/sources/{source['source_id']}/images/2")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert response.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_a_slice_index_outside_the_volume_is_refused(client):
+    source = upload_blocky_series(client, slices=6, rows=24, cols=24)
+    assert client.get(f"/sources/{source['source_id']}/images/6").status_code == 404
+    assert client.get(f"/sources/{source['source_id']}/images/-1").status_code == 404
+
+
+def test_an_uploaded_photo_is_served_as_itself(client):
+    """A photo is not a slice: it is shown as captured, not re-encoded."""
+    jpeg = b"\xff\xd8\xff\xe0" + b"jpeg payload" * 4
+    source = client.post(
+        "/sources/images",
+        files=[("files", ("anterior.jpg", jpeg, "image/jpeg"))],
+        data={"workspace_id": "ws-1", "set_id": "set-1"},
+    ).json()
+
+    listing = client.get(f"/sources/{source['source_id']}/images").json()
+    assert listing["kind"] == "images"
+    assert listing["count"] == 1
+    assert listing["images"][0]["media_type"] == "image/jpeg"
+
+    response = client.get(f"/sources/{source['source_id']}/images/0")
+    assert response.status_code == 200
+    assert response.content == jpeg
+
+
+def test_the_image_window_can_be_overridden(client):
+    """Contrast is the one thing a viewer must be able to change."""
+    source = upload_blocky_series(client, slices=4, rows=24, cols=24)
+    wide = client.get(f"/sources/{source['source_id']}/images/1?level=0&window=4000")
+    narrow = client.get(f"/sources/{source['source_id']}/images/1?level=500&window=50")
+    assert wide.status_code == narrow.status_code == 200
+    # A different window must actually change the pixels, not just the header.
+    assert wide.content != narrow.content
+
+
+def test_the_slice_spacing_is_not_scaled_twice(client):
+    """The listing and the slice's own header must agree.
+
+    The stored volume spacing is already the spacing *after* subsampling, so
+    applying the stride again reports every slice as twice as far from its
+    neighbour as it is — and a viewer that draws a scale bar would be wrong.
+    """
+    source = upload_blocky_series(client, slices=6, rows=24, cols=24)
+
+    listing = client.get(f"/sources/{source['source_id']}/images").json()
+    header = client.get(f"/sources/{source['source_id']}/images/1").headers[
+        "x-slice-spacing-mm"
+    ]
+    assert float(header) == pytest.approx(listing["slice_spacing_mm"])

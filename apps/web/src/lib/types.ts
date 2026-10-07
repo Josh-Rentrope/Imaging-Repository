@@ -208,6 +208,27 @@ export interface SourceSummary {
   render_reason: string | null
 }
 
+/** One entry in the Image View: a DICOM slice, or an uploaded photo. */
+export interface SourceImage {
+  index: number
+  name: string
+  /** Photos only: the original size on disk. */
+  bytes?: number
+  media_type?: string
+}
+
+export interface SourceImages {
+  source_id: string
+  kind: SourceKind
+  /** Present for DICOM: the plane the slices are cut on. */
+  axis?: string
+  count: number
+  /** DICOM only: the series window, and the spacing between listed slices. */
+  window?: { center: number | null; width: number | null }
+  slice_spacing_mm?: number | null
+  images: SourceImage[]
+}
+
 export interface VolumeHeader {
   dims: [number, number, number]
   spacing: [number, number, number]

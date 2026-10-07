@@ -17,6 +17,16 @@ export interface Ray {
   direction: Vec3
 }
 
+/**
+ * Whether a point survives the cutting planes.
+ *
+ * vtk keeps the half-space a plane's normal points into, so a point is hidden
+ * when it falls on the far side of any of them. Tested per hit rather than per
+ * triangle: a triangle straddling the cut is partly visible, and rejecting it
+ * wholesale would make everything along the cut unclickable.
+ */
+export type Visibility = (x: number, y: number, z: number) => boolean
+
 export interface MeshHit {
   /** Index of the triangle, not of a vertex. */
   triangle: number
@@ -78,6 +88,7 @@ export function intersectMesh(
   ray: Ray,
   positions: ArrayLike<number>,
   polys: ArrayLike<number>,
+  visible?: Visibility,
 ): MeshHit | null {
   const { origin, direction } = ray
   const ox = origin[0]
@@ -141,10 +152,19 @@ export function intersectMesh(
     if (v < 0 || u + v > 1) continue
 
     const distance = (e2x * qx + e2y * qy + e2z * qz) * inverse
-    if (distance > EPSILON && distance < bestDistance) {
-      bestDistance = distance
-      bestTriangle = at >> 2
+    if (distance <= EPSILON || distance >= bestDistance) continue
+
+    // Clipped away, so the ray carries on through it — which is what the eye
+    // does, since the cutting plane has removed the surface from view.
+    if (visible) {
+      const hx = ox + dx * distance
+      const hy = oy + dy * distance
+      const hz = oz + dz * distance
+      if (!visible(hx, hy, hz)) continue
     }
+
+    bestDistance = distance
+    bestTriangle = at >> 2
   }
 
   return bestTriangle < 0 ? null : { triangle: bestTriangle, distance: bestDistance }

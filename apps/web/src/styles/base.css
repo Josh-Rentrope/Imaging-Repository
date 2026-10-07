@@ -77,11 +77,134 @@ button, select, input {
   min-height: 0;
 }
 
+/* Column now: a tab strip over the pane it selects. */
 .viewport {
-  position: relative;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
   background: #0d0f11;
+}
+
+.view-tabs {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  padding: 0 8px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.view-tab {
+  padding: 6px 12px;
+  font-size: 12px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.view-tab:hover { color: var(--fg); }
+
+.view-tab.active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+
+/* The pane is what the canvas, the overlays and the image stage are placed
+   against. It is the thing that replaced `.viewport` for positioning. */
+.view-pane {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* ── Image View ──────────────────────────────────────────────────────────── */
+
+.image-view {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: 148px 1fr;
+  min-height: 0;
+}
+
+.image-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.image-list-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 5px;
+  font-size: 10px;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.image-list-item img {
+  width: 30px;
+  height: 30px;
+  object-fit: cover;
+  border-radius: 2px;
+  background: #000;
+}
+
+.image-list-item.active {
+  background: var(--control);
+  border-color: var(--accent);
+  color: var(--fg);
+}
+
+.image-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.image-stage-head,
+.image-stage-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  flex: none;
+}
+
+.image-stage-foot { border-top: 1px solid var(--border); }
+.image-stage-foot input[type='range'] { flex: 1; min-width: 0; }
+
+.image-window {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+}
+
+.image-window .number-input { width: 62px; }
+
+.image-full {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  object-fit: contain;
+  background: #000;
 }
 
 /* The canvas is clipped here rather than on .viewport, so popover panels can
