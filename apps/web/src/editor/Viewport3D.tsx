@@ -3,6 +3,8 @@ import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { api } from '../lib/api'
 import type { Job, ResultEnvelope, SourceSummary, VolumePayload } from '../lib/types'
 import type { SceneInput } from './Scene'
+import { ViewportControls } from './ViewportControls'
+import { DEFAULT_SETTINGS, type ViewportSettings } from './viewportSettings'
 
 // vtk.js is heavy and is only needed once something is actually being rendered,
 // so the whole renderer is behind a dynamic import.
@@ -47,6 +49,7 @@ export function Viewport3D({
 }) {
   const [volume, setVolume] = useState<VolumePayload | null>(null)
   const [loadingVolume, setLoadingVolume] = useState(false)
+  const [settings, setSettings] = useState<ViewportSettings>(DEFAULT_SETTINGS)
 
   const renderableDicom = source?.kind === 'dicom' && source.renderable
 
@@ -84,19 +87,28 @@ export function Viewport3D({
     return null
   }, [mesh?.ref, mesh?.format, volume])
 
+  const hasVolume = input?.kind === 'volume'
+
   return (
     <section className="viewport">
       <div className="viewport-overlay">
         <span className="tag">{source?.name ?? 'No source'}</span>
-        <span style={{ display: 'flex', gap: 6 }}>
+        <span style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
           {busy && <span className="tag">running</span>}
           {result && <ScaleTag scale={result.scale} />}
+          {input && (
+            <ViewportControls
+              settings={settings}
+              onChange={setSettings}
+              valueRange={hasVolume ? (volume?.header.value_range ?? null) : null}
+            />
+          )}
         </span>
       </div>
 
       {input ? (
         <Suspense fallback={<div className="empty-state">Loading renderer…</div>}>
-          <Scene input={input} />
+          <Scene input={input} settings={settings} />
         </Suspense>
       ) : (
         <div className="empty-state">{placeholderFor(source, loadingVolume)}</div>
