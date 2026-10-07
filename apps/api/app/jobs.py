@@ -5,8 +5,14 @@ under `--reload`, so every backend edit restarts the process — an in-memory
 store would drop the result of a segmentation that took minutes, and the
 artifacts would still be sitting on disk with nothing left to describe them.
 
-Each job is one JSON file beside the artifacts it points at. The in-memory dict
-stays the working set; the files are the record.
+Each job is one JSON object beside the artifacts it points at. The in-memory dict
+stays the working set; the store is the record.
+
+Jobs are held **per viewer**. One viewer's history is loaded the first time they
+ask for it and never loaded for a viewer who has not, because with tenancy on,
+eagerly reading every job in the store would put one viewer's work into the
+process memory serving another — which is the exact thing the separation exists
+to prevent.
 """
 
 from __future__ import annotations
@@ -14,46 +20,124 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from contextlib import suppress
 from datetime import UTC, datetime
-from pathlib import Path
+
+from fastapi import HTTPException
 
 from .models import Job, JobCreate, JobStatus
-from .storage import LocalStorage
 from .pipeline import (
     DIAGNOSTIC_OPS,
     BackendRegistry,
     InferenceRequest,
     OpNotSupported,
 )
+from .storage import Storage
+from .tenancy import current_folder
 
 #: Enough history to survive a working session without growing without bound.
 MAX_JOBS = 500
+
+_JOBS_PREFIX = "jobs/"
+
+
+def _viewer() -> str:
+    """The viewer whose jobs the caller may see.
+
+    Empty when tenancy is off, which is the single shared namespace this store
+    had before viewers existed.
+    """
+    return current_folder.get() or ""
+
+
+def _job_key(job_id: str) -> str:
+    return f"{_JOBS_PREFIX}{job_id}.json"
 
 
 class JobStore:
     def __init__(
         self,
         registry: BackendRegistry,
-        data_dir: Path | None = None,
+        storage: Storage | None = None,
         max_jobs: int = MAX_JOBS,
-        storage: LocalStorage | None = None,
+        preload: bool = True,
     ) -> None:
         self._registry = registry
         # Held so deleting a job can delete what it produced, rather than
-        # leaving the bytes behind for the next directory walk to find.
+        # leaving the bytes behind for the next walk of the store to find.
         self._storage = storage
-        self._jobs: dict[str, Job] = {}
         self._max_jobs = max_jobs
         # Workers mutate jobs while request threads read them.
         self._lock = threading.RLock()
-        self._dir = (data_dir / "jobs") if data_dir is not None else None
-        if self._dir is not None:
-            self._dir.mkdir(parents=True, exist_ok=True)
-            self._load()
+        # viewer -> job_id -> Job, with the set of viewers already read back.
+        self._jobs: dict[str, dict[str, Job]] = {}
+        self._loaded: set[str] = set()
+        if preload:
+            # Only when tenancy is off: at startup there is no viewer in scope,
+            # so on a scoped store there is nothing safe to read.
+            self._bucket()
+
+    # ── visibility ──────────────────────────────────────────────────────────
+
+    def _bucket(self) -> dict[str, Job]:
+        """The current viewer's jobs, read back on first use.
+
+        Takes no argument on purpose. The store underneath is scoped by the
+        ambient viewer, so a bucket keyed by anything other than that viewer
+        would be a bucket whose keys came from one folder and whose name claimed
+        another.
+        """
+        viewer = _viewer()
+        with self._lock:
+            if viewer not in self._loaded:
+                self._loaded.add(viewer)
+                self._read_back(viewer)
+            return self._jobs.setdefault(viewer, {})
+
+    def _read_back(self, viewer: str) -> None:
+        """Read one viewer's jobs out of the store.
+
+        A record that will not parse is skipped rather than fatal: one truncated
+        write must not cost every other result in the folder.
+
+        Called with the lock held, and doing io under it, which is a deliberate
+        trade: it happens once per viewer per process, and the alternative is two
+        threads racing to be the first to populate the same bucket.
+        """
+        if self._storage is None:
+            return
+        bucket = self._jobs.setdefault(viewer, {})
+        try:
+            keys = self._storage.list_keys(_JOBS_PREFIX)
+        except (OSError, ValueError, HTTPException):
+            # A store that cannot be listed is a store with nothing to show, not
+            # a reason to refuse to start. This runs during startup, so letting it
+            # out would mean an API that will not boot because a bucket was
+            # briefly unreachable -- and empty-but-up beats down. The write path
+            # is where the real problem gets reported.
+            return
+        for key in keys:
+            try:
+                job = Job.model_validate_json(self._storage.get(self._storage.ref(key)))
+            except (ValueError, OSError, HTTPException):
+                continue
+            bucket[job.job_id] = job
+
+    def _live(self) -> dict[str, Job]:
+        """The current viewer's jobs, without reading anything back.
+
+        For the paths that already hold the job in hand. Recording an outcome
+        must not be able to fail because the store is unreachable, or the code
+        responsible for resolving a job is the code that leaves it unresolved --
+        and a job stuck in `queued` is far harder to explain than a failed one.
+        """
+        return self._jobs.setdefault(_viewer(), {})
+
+    # ── reads ───────────────────────────────────────────────────────────────
 
     def list(self, limit: int = 50, source_id: str | None = None) -> list[Job]:
         with self._lock:
-            jobs = list(self._jobs.values())
+            jobs = list(self._bucket().values())
         if source_id is not None:
             jobs = [job for job in jobs if _source_of(job) == source_id]
         ordered = sorted(jobs, key=lambda j: j.created_at, reverse=True)
@@ -61,7 +145,7 @@ class JobStore:
 
     def get(self, job_id: str) -> Job | None:
         with self._lock:
-            return self._jobs.get(job_id)
+            return self._bucket().get(job_id)
 
     def wait(self, job_id: str, timeout: float | None = None) -> Job | None:
         """Block until a job finishes. Tests and callers that want the old
@@ -75,6 +159,8 @@ class JobStore:
                 return job
             time.sleep(0.01)
 
+    # ── writes ──────────────────────────────────────────────────────────────
+
     def rename(self, job_id: str, name: str | None) -> Job | None:
         updated = self._replace(job_id, name=name)
         if updated is not None:
@@ -84,17 +170,18 @@ class JobStore:
     def delete(self, job_id: str) -> Job | None:
         """Forget a job and every artifact it points at.
 
-        Both halves matter. Dropping the record alone leaves the mesh on disk to
-        be re-indexed by anything that walks the directory, and dropping the
-        files alone leaves a job whose result 404s.
+        Both halves matter. Dropping the record alone leaves the mesh in the
+        store to be re-indexed by anything that walks it, and dropping the files
+        alone leaves a job whose result 404s.
         """
         with self._lock:
-            job = self._jobs.pop(job_id, None)
+            job = self._bucket().pop(job_id, None)
         if job is None:
             return None
 
-        if self._dir is not None:
-            (self._dir / f"{job_id}.json").unlink(missing_ok=True)
+        if self._storage is not None:
+            with suppress(OSError, ValueError, HTTPException):
+                self._storage.remove_tree(_job_key(job_id))
         self._remove_artifacts(job)
         return job
 
@@ -104,12 +191,10 @@ class JobStore:
         result_id = job.result.get("result_id")
         if not result_id:
             return
-        try:
+        # The record is already gone; a file that will not delete is not a reason
+        # to fail the request.
+        with suppress(OSError, ValueError, HTTPException):
             self._storage.remove_tree(f"artifacts/{result_id}")
-        except (OSError, ValueError):
-            # The record is already gone; a file that will not delete is not a
-            # reason to fail the request.
-            pass
 
     def _replace(self, job_id: str, **fields) -> Job | None:
         """Update a job under the lock, returning the new state.
@@ -118,41 +203,25 @@ class JobStore:
         sees a whole state and not a half-applied one.
         """
         with self._lock:
-            job = self._jobs.get(job_id)
+            bucket = self._live()
+            job = bucket.get(job_id)
             if job is None:
                 return None
             updated = job.model_copy(update=fields)
-            self._jobs[job_id] = updated
+            bucket[job_id] = updated
             return updated
 
     # ── durability ──────────────────────────────────────────────────────────
 
-    def _load(self) -> None:
-        """Read back whatever is still on disk.
-
-        A file that will not parse is skipped rather than fatal: one truncated
-        write must not cost every other result in the directory.
-        """
-        assert self._dir is not None
-        for path in sorted(self._dir.glob("*.json")):
-            try:
-                job = Job.model_validate_json(path.read_text(encoding="utf-8"))
-            except (ValueError, OSError):
-                continue
-            self._jobs[job.job_id] = job
-
     def _persist(self, job: Job) -> None:
-        if self._dir is None:
+        if self._storage is None:
             return
-        path = self._dir / f"{job.job_id}.json"
-        # Written to a sibling and moved, so a crash mid-write cannot leave a
-        # half-file where a job used to be.
-        staging = path.with_suffix(".json.tmp")
-        try:
-            staging.write_text(job.model_dump_json(indent=2), encoding="utf-8")
-            staging.replace(path)
-        except OSError:
-            staging.unlink(missing_ok=True)
+        # A record that will not persist must not take the job with it: the
+        # in-memory copy is still the truth for this process.
+        with suppress(OSError, HTTPException):
+            self._storage.put(
+                _job_key(job.job_id), job.model_dump_json(indent=2).encode("utf-8")
+            )
 
     def submit(self, request: JobCreate, allow_diagnostic_server: bool) -> Job:
         """Accept a job and return it immediately, before it has run.
@@ -196,15 +265,23 @@ class JobStore:
         self._remember(job)
         worker = threading.Thread(
             target=self._execute,
-            args=(job, request),
+            args=(job, request, _viewer()),
             name=f"job-{job.job_id[:8]}",
             daemon=True,
         )
         worker.start()
         return job
 
-    def _execute(self, job: Job, request: JobCreate) -> None:
-        """Run one job, on its own thread, recording how it ended."""
+    def _execute(self, job: Job, request: JobCreate, viewer: str) -> None:
+        """Run one job, on its own thread, recording how it ended.
+
+        The viewer is re-established here rather than inherited. A bare
+        `threading.Thread` starts with a fresh context, so the context variable
+        the request set is *not* visible on this thread — and the work this
+        thread does writes artefacts, which must land in the folder that asked
+        for them and nowhere else.
+        """
+        token = current_folder.set(viewer or None)
         try:
             self._replace(job.job_id, status=JobStatus.RUNNING)
             backend = self._registry.resolve(job.ops, request.backend)
@@ -228,15 +305,18 @@ class JobStore:
             finished = self._replace(job.job_id, finished_at=datetime.now(UTC))
             if finished is not None:
                 self._persist(finished)
+            current_folder.reset(token)
 
     def _remember(self, job: Job) -> None:
         with self._lock:
-            self._jobs[job.job_id] = job
-            while len(self._jobs) > self._max_jobs:
-                oldest = min(self._jobs.values(), key=lambda j: j.created_at)
-                self._jobs.pop(oldest.job_id, None)
-                if self._dir is not None:
-                    (self._dir / f"{oldest.job_id}.json").unlink(missing_ok=True)
+            bucket = self._live()
+            bucket[job.job_id] = job
+            while len(bucket) > self._max_jobs:
+                oldest = min(bucket.values(), key=lambda j: j.created_at)
+                bucket.pop(oldest.job_id, None)
+                if self._storage is not None:
+                    with suppress(OSError, ValueError, HTTPException):
+                        self._storage.remove_tree(_job_key(oldest.job_id))
                 self._remove_artifacts(oldest)
 
 

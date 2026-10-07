@@ -1,9 +1,13 @@
 """Artefact serving.
 
-Artefacts are addressed by opaque ref, never by path, so tenant-scoped buckets
-and signed URLs can be swapped in behind this route.
+Artefacts are addressed by an opaque ref, never by a path, so the backend behind
+this route can be a directory today and a bucket later without the route
+changing.
 
-Not authenticated yet: every read is unscoped.
+Reads are scoped: a ref is served only to the viewer whose folder minted it, and
+a ref naming any other folder is reported as missing rather than fetched. That
+scoping is what makes an artefact URL unshareable -- the URL alone is not enough
+without the cookie, which is the property refs were made opaque for.
 """
 
 from __future__ import annotations
@@ -11,10 +15,10 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 
 from ..deps import get_storage
-from ..storage import LocalStorage
+from ..storage import SCHEME, Storage
 
 router = APIRouter(prefix="/artifacts", tags=["artifacts"])
 
@@ -30,19 +34,24 @@ _MEDIA_TYPES = {
 
 
 @router.get("/{ref:path}")
-def fetch(ref: str, storage: Annotated[LocalStorage, Depends(get_storage)]) -> FileResponse:
+def fetch(ref: str, storage: Annotated[Storage, Depends(get_storage)]) -> Response:
     # Callers pass the ref with its scheme; strip the single leading slash the
     # path converter leaves behind when it is absent.
-    full_ref = ref if "://" in ref else f"local://{ref}"
+    full_ref = ref if "://" in ref else f"{SCHEME}{ref}"
     try:
-        path = storage.path_for(full_ref)
+        data = storage.get(full_ref)
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    return FileResponse(
-        path,
-        media_type=_MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream"),
-        filename=path.name,
+    # The name is taken from the key rather than from a path, because on a bucket
+    # there is no path. Everything here is a small mesh, mask or header the client
+    # asked for whole, so the body is served in one piece.
+    name = full_ref.rsplit("/", 1)[-1]
+    suffix = f".{name.rsplit('.', 1)[-1].lower()}" if "." in name else ""
+    return Response(
+        content=data,
+        media_type=_MEDIA_TYPES.get(suffix, "application/octet-stream"),
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
     )

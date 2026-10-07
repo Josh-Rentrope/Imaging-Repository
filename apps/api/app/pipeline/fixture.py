@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from ..sources import SourceStore
-from ..storage import LocalStorage
+from ..storage import Storage
 from . import solvers, totalseg
 from .interfaces import (
     BackendId,
@@ -114,7 +114,7 @@ _IMPLEMENTATIONS: dict[str, dict[str, Any]] = {
 class FixtureBackend:
     def __init__(
         self,
-        storage: LocalStorage,
+        storage: Storage,
         source_store: SourceStore | None = None,
         recordings_dir: Path | None = None,
     ) -> None:
@@ -249,7 +249,7 @@ def _rectify(envelope: dict, params: dict, context: dict) -> None:
 
 
 def _reconstruct(envelope: dict, params: dict, context: dict) -> None:
-    storage: LocalStorage = context["storage"]
+    storage: Storage = context["storage"]
     capture = context["capture"]
 
     verts, faces = build_dental_arch()
@@ -308,15 +308,21 @@ def _segment(envelope: dict, params: dict, context: dict) -> None:
 
 
 def _segment_volume(envelope: dict, params: dict, context: dict, sources, record) -> None:
-    storage: LocalStorage = context["storage"]
+    storage: Storage = context["storage"]
     classes = params.get("classes") or None
 
-    seg = totalseg.run(
-        sources.directory(record.source_id),
-        classes=classes,
-        fast=bool(params.get("fast", True)),
-        task=str(params.get("task", "total")),
-    )
+    # TotalSegmentator is an external command that reads a directory, so the
+    # source has to exist as real files for the duration of the run. On a local
+    # store that is the store itself; on a bucket it is a staging directory that
+    # is downloaded into and removed again, which is why this is a context
+    # manager rather than a path.
+    with sources.materialize(record.source_id) as dicom_dir:
+        seg = totalseg.run(
+            dicom_dir,
+            classes=classes,
+            fast=bool(params.get("fast", True)),
+            task=str(params.get("task", "total")),
+        )
     blob, header = totalseg.serialise(seg)
 
     header_ref = storage.put(
@@ -477,7 +483,7 @@ def _px2tooth(envelope: dict, params: dict, context: dict) -> None:
     fiducial says otherwise, because the pixel spacing of a panoramic is
     frequently absent and a wrong millimetre here is a wrong treatment plan.
     """
-    storage: LocalStorage = context["storage"]
+    storage: Storage = context["storage"]
 
     # A panoramic is metrically unreliable in a way other radiographs are not.
     # It is a curved-surface projection with magnification that varies across the
@@ -530,7 +536,7 @@ def _measure(envelope: dict, params: dict, context: dict) -> None:
 
 
 def _isolate_volume(envelope: dict, params: dict, context: dict) -> None:
-    storage: LocalStorage = context["storage"]
+    storage: Storage = context["storage"]
     ref = storage.put(
         f"artifacts/{envelope['result_id']}/volume.vtk",
         _placeholder_volume(32),
@@ -560,7 +566,7 @@ def _iso_surface(envelope: dict, params: dict, context: dict) -> None:
 def _iso_surface_labelled(
     envelope: dict, params: dict, context: dict, segmentation: dict
 ) -> None:
-    storage: LocalStorage = context["storage"]
+    storage: Storage = context["storage"]
 
     header = json.loads(storage.get(segmentation["mask_header_ref"]).decode("utf-8"))
     legend = {int(k): str(v) for k, v in (header.get("legend") or {}).items()}
@@ -627,7 +633,7 @@ def _iso_surface_labelled(
 
 def _iso_surface_threshold(envelope: dict, params: dict, context: dict) -> None:
     """Density threshold over the volume. No labels — there is nothing to label with."""
-    storage: LocalStorage = context["storage"]
+    storage: Storage = context["storage"]
     sources: SourceStore | None = context.get("sources")
     source_id = (context.get("capture") or {}).get("source_id")
 
@@ -739,7 +745,7 @@ def _bounds(vertices) -> list[float]:
 
 
 def _detect_caries(envelope: dict, params: dict, context: dict) -> None:
-    storage: LocalStorage = context["storage"]
+    storage: Storage = context["storage"]
     overlay = {
         "findings": [
             {"fdi": 16, "surface": "mesial", "depth": "enamel", "confidence": 0.71},

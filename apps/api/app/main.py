@@ -18,6 +18,7 @@ from .pipeline import solvers as solver_registry
 from .routers import artifacts, exports, health, jobs, samples, segmenter, solvers, sources
 from .sources import SourceStore
 from .storage import LocalStorage
+from .tenancy import ViewerMiddleware, ViewerScopedStorage
 
 
 @asynccontextmanager
@@ -27,7 +28,11 @@ async def lifespan(app: FastAPI):
     # the normal case for a checkout of this repo, and is not an error.
     solver_registry.load_registered()
     app.state.settings = settings
-    app.state.storage = LocalStorage(settings.data_dir)
+    # One store for the process, scoped to whichever viewer is in play at the
+    # moment of each call. Every holder below therefore stays viewer-agnostic.
+    app.state.storage = ViewerScopedStorage(
+        LocalStorage(settings.data_dir), enabled=settings.multi_tenant
+    )
     # The source store comes first: the pipeline reads volumes out of it.
     app.state.source_store = SourceStore(app.state.storage)
     app.state.registry = BackendRegistry(
@@ -37,7 +42,12 @@ async def lifespan(app: FastAPI):
         source_store=app.state.source_store,
     )
     app.state.job_store = JobStore(
-        app.state.registry, data_dir=settings.data_dir, storage=app.state.storage
+        app.state.registry,
+        storage=app.state.storage,
+        # With tenancy on there is no viewer at startup, so there is no folder
+        # that could be read back safely. Each viewer's history is loaded on
+        # their first request instead.
+        preload=not settings.multi_tenant,
     )
     yield
 
@@ -52,6 +62,12 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Middleware is applied inside-out, so the one added *last* ends up
+    # outermost. CORS is added last on purpose: it then wraps the viewer, which
+    # means a preflight is answered without touching a viewer, and a failure
+    # inside the viewer still comes back with CORS headers instead of surfacing
+    # in the browser as an opaque cross-origin error.
+    app.add_middleware(ViewerMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,

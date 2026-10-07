@@ -2,21 +2,29 @@
 
 A *source* is one thing the user dropped into a working set: a DICOM series or
 a set of images. Both live under `sources/<source_id>/` with an `index.json`
-describing them, so listing is a directory scan and deleting is a directory
-removal.
+describing them, so listing is a key scan and deleting is a subtree removal.
 
 Sources are scoped by `workspace_id` and `set_id`, which the client supplies.
-Those are opaque client-generated strings today; when a real tenant model lands
-they become server-issued. Storing them now means persistence works without
-waiting for auth.
+Those are opaque client-generated strings. `workspace_id` in particular is *not*
+a security boundary -- the client makes it up -- so it groups work but does not
+keep anyone apart. What keeps viewers apart is the storage scope in
+`app/tenancy.py`, which is applied underneath these keys and is not something the
+client can name.
+
+Everything here goes through the `Storage` seam rather than touching a directory,
+because the deployed store is a bucket: `directory()` used to hand a real path to
+the segmenter, and `materialize()` replaces it.
 """
 
 from __future__ import annotations
 
 import io
 import json
+import tempfile
 import uuid
 import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -26,7 +34,7 @@ from pydantic import BaseModel, Field
 from .dicom import parse_file
 from .dicom.volume import build as build_volume
 from .dicom.volume import serialise, serialise_json
-from .storage import LocalStorage
+from .storage import Storage
 
 MAX_FILES = 4000
 MAX_TOTAL_BYTES = 3 * 1024**3
@@ -122,48 +130,58 @@ def expand_uploads(files: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
                         continue
                     # Keep the basename: archives often nest a folder, and the
                     # path adds nothing since sources are already isolated.
-                    expanded.append((Path(info.filename).name, archive.read(info)))
+                    base = Path(info.filename).name
+                    # Entry names are attacker-chosen. A name that reduces to a
+                    # bare `.` or `..` is not a file and would become a key the
+                    # store refuses -- refused here too, rather than surfacing as
+                    # a 400 on an otherwise valid upload.
+                    if base in ("", ".", ".."):
+                        continue
+                    expanded.append((base, archive.read(info)))
         except zipfile.BadZipFile:
             expanded.append((name, data))
     return expanded
 
 
 class SourceStore:
-    def __init__(self, storage: LocalStorage) -> None:
+    def __init__(self, storage: Storage) -> None:
         self.storage = storage
 
-    # -- paths --------------------------------------------------------------
+    # -- keys ---------------------------------------------------------------
 
-    def _dir(self, source_id: str) -> Path:
-        return self.storage.root / "sources" / source_id
+    @staticmethod
+    def _index_key(source_id: str) -> str:
+        return f"sources/{source_id}/index.json"
 
-    def _index(self, source_id: str) -> Path:
-        return self._dir(source_id) / "index.json"
+    @staticmethod
+    def _files_prefix(source_id: str) -> str:
+        return f"sources/{source_id}/files/"
 
-    def directory(self, source_id: str) -> Path:
-        """Where a source's uploaded files live. Passed straight to external tools."""
-        return self._dir(source_id) / "files"
+    def _stored(self, key: str) -> SourceRecord | None:
+        ref = self.storage.ref(key)
+        if not self.storage.exists(ref):
+            return None
+        return SourceRecord.model_validate_json(self.storage.get(ref))
 
     # -- reads --------------------------------------------------------------
 
     def get(self, source_id: str) -> SourceRecord | None:
-        index = self._index(source_id)
-        if not index.is_file():
-            return None
-        return SourceRecord.model_validate_json(index.read_text(encoding="utf-8"))
+        return self._stored(self._index_key(source_id))
 
     def list(
         self, workspace_id: str | None = None, set_id: str | None = None
     ) -> list[SourceRecord]:
-        root = self.storage.root / "sources"
-        if not root.is_dir():
-            return []
-
         records: list[SourceRecord] = []
-        for index in sorted(root.glob("*/index.json")):
+        for key in self.storage.list_keys("sources/"):
+            if not key.endswith("/index.json"):
+                continue
             try:
-                record = SourceRecord.model_validate_json(index.read_text(encoding="utf-8"))
-            except Exception:
+                record = self._stored(key)
+            except ValueError:
+                # A record that will not parse is skipped rather than fatal: one
+                # bad write must not hide every other source.
+                continue
+            if record is None:
                 continue
             if workspace_id is not None and record.workspace_id != workspace_id:
                 continue
@@ -174,24 +192,44 @@ class SourceStore:
         records.sort(key=lambda r: r.created_at)
         return records
 
+    @contextmanager
+    def materialize(self, source_id: str) -> Iterator[Path]:
+        """A directory holding this source's uploaded files.
+
+        The segmenter is an external command that takes a directory on disk, so
+        something has to put real files somewhere. On a local store that is
+        already true and the folder is handed over as-is. On a bucket there is no
+        folder to hand over, so the objects are pulled into a temporary directory
+        for the duration of the call and removed with it -- and because that
+        happens per run, a source can be far larger than the container's disk
+        without the store having to keep a copy of everything.
+        """
+        prefix = self._files_prefix(source_id)
+        direct = self.storage.local_dir(prefix)
+        if direct is not None:
+            yield direct
+            return
+
+        with tempfile.TemporaryDirectory(prefix="bone-viewer-source-") as staging:
+            staged = Path(staging)
+            for key in self.storage.list_keys(prefix):
+                name = key.rsplit("/", 1)[-1]
+                staged.joinpath(name).write_bytes(self.storage.get(self.storage.ref(key)))
+            yield staged
+
     # -- writes -------------------------------------------------------------
 
     def save(self, record: SourceRecord) -> SourceRecord:
-        self._dir(record.source_id).mkdir(parents=True, exist_ok=True)
         self.storage.put(
-            f"sources/{record.source_id}/index.json",
+            self._index_key(record.source_id),
             json.dumps(record.model_dump(mode="json"), indent=2).encode("utf-8"),
         )
         return record
 
     def delete(self, source_id: str) -> bool:
-        directory = self._dir(source_id)
-        if not directory.is_dir():
+        if not self.storage.exists(self.storage.ref(self._index_key(source_id))):
             return False
-        # Storage root is trusted here; the id came from a validated record.
-        import shutil
-
-        shutil.rmtree(directory, ignore_errors=True)
+        self.storage.remove_tree(f"sources/{source_id}")
         return True
 
     # -- ingestion ----------------------------------------------------------

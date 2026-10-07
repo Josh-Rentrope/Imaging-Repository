@@ -13,10 +13,15 @@ from .config import Settings, get_settings
 from .jobs import JobStore
 from .pipeline import BackendRegistry
 from .sources import SourceStore
-from .storage import LocalStorage
+from .storage import Storage
 
 
-def get_storage(request: Request) -> LocalStorage:
+def get_storage(request: Request) -> Storage:
+    """The store, already scoped to the viewer making this request.
+
+    Which folder that is was settled by the middleware before the route ran, so
+    nothing below here has to know about viewers at all.
+    """
     return request.app.state.storage
 
 

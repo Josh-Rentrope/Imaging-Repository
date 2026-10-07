@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ..sources import SourceStore
-from ..storage import LocalStorage
+from ..storage import Storage
 from .fixture import FixtureBackend
 from .interfaces import (
     BackendId,
@@ -26,7 +26,7 @@ from .server import load_server_backend
 class BackendRegistry:
     def __init__(
         self,
-        storage: LocalStorage,
+        storage: Storage,
         recordings_dir: Path | None = None,
         preference: str = "auto",
         source_store: SourceStore | None = None,
