@@ -12,6 +12,7 @@ from fastapi import Request
 from .config import Settings, get_settings
 from .jobs import JobStore
 from .pipeline import BackendRegistry
+from .sources import SourceStore
 from .storage import LocalStorage
 
 
@@ -27,8 +28,19 @@ def get_job_store(request: Request) -> JobStore:
     return request.app.state.job_store
 
 
+def get_source_store(request: Request) -> SourceStore:
+    return request.app.state.source_store
+
+
 def get_config(request: Request) -> Settings:
     return request.app.state.settings
 
 
-__all__ = ["get_config", "get_job_store", "get_registry", "get_settings", "get_storage"]
+__all__ = [
+    "get_config",
+    "get_job_store",
+    "get_registry",
+    "get_settings",
+    "get_source_store",
+    "get_storage",
+]

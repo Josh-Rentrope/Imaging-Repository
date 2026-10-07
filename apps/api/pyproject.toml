@@ -8,6 +8,8 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "pydantic>=2.9",
     "python-multipart>=0.0.12",
+    "pydicom>=3.0.2",
+    "numpy>=2.5.3",
 ]
 
 [project.optional-dependencies]

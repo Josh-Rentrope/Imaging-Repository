@@ -1,5 +1,5 @@
 """HTTP routers."""
 
-from . import artifacts, dicom, health, jobs
+from . import artifacts, health, jobs, sources
 
-__all__ = ["artifacts", "dicom", "health", "jobs"]
+__all__ = ["artifacts", "health", "jobs", "sources"]
