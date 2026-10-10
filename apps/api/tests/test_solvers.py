@@ -247,16 +247,137 @@ def test_a_solver_that_claims_to_be_available_and_then_is_not(client, installed,
     assert "CUDA out of memory" in job["error"]
 
 
+class _Published:
+    """An entry point standing in for one, without needing a real module.
+
+    `target` is what `load()` returns, which the loader then *calls* -- an entry
+    point value is `module:Class`, so a class is the faithful stand-in and the
+    loader's `load()()` is what instantiates it.
+
+    Carries `name` and `value` because the loader reads both while reporting a
+    failure. A double that omits them raises inside the handler that is meant to
+    be doing the reporting, and the test then proves nothing about the loader.
+    """
+
+    def __init__(self, name: str, target: object) -> None:
+        self.name = name
+        self.value = f"tests.stubs:{name}"
+        self._target = target
+
+    def load(self):
+        if isinstance(self._target, BaseException):
+            raise self._target
+        return self._target
+
+
+@pytest.fixture(autouse=True)
+def clean_discovery():
+    """Restore the module-global discovery state after each test.
+
+    `load_registered()` writes into `_BROKEN` in place, so a test that publishes
+    a broken entry point would otherwise leave it recorded for everything that
+    runs afterwards -- and the symptom would be a failure in a test that never
+    went near discovery.
+
+    Autouse, because forgetting it is silent in one direction and confusing in
+    the other.
+    """
+    saved = dict(solvers._BROKEN)
+    saved_error = solvers.discovery_error()
+    solvers._BROKEN.clear()
+    yield
+    solvers._BROKEN.clear()
+    solvers._BROKEN.update(saved)
+    solvers._DISCOVERY_ERROR = saved_error
+
+
 def test_discovery_of_a_broken_entry_point_does_not_stop_a_run(monkeypatch):
-    """A solver that will not import is unavailable, not fatal."""
-    class Broken:
-        def load(self):
-            raise ImportError("no torch")
+    """A solver that will not import is unavailable, not fatal.
+
+    A real `EntryPoint` rather than a double: it is the class the loader is
+    actually handed, so a change to what the loader reads off it fails here.
+    """
+    from importlib.metadata import EntryPoint
+
+    broken = EntryPoint(
+        name="colmap",
+        value="a_module_that_is_not_installed:ColmapSolver",
+        group=solvers.ENTRY_POINT_GROUP,
+    )
+    monkeypatch.setattr(solvers, "entry_points", lambda group: [broken], raising=False)
+
+    assert solvers.load_registered() == []
+    # Reported, and reported as itself. "Nothing loaded" and "something is
+    # installed and will not load" used to be the same answer.
+    assert "ModuleNotFoundError" in solvers.load_failures()["colmap"]
+
+
+def test_a_solver_that_loads_but_carries_no_info_does_not_crash_startup(monkeypatch):
+    """`register()` reads `solver.info.name`, and it used to run outside the try.
+
+    So an entry point returning an object without `info` raised out of the
+    lifespan and took the app down -- over a plugin, which is precisely what an
+    unusable plugin is supposed to be harmless as.
+    """
+
+    class NoInfo:
+        def available(self):
+            return True, None
+
+        def solve(self, frames, params):
+            return solvers.PoseOutcome(poses=[])
 
     monkeypatch.setattr(
-        solvers, "entry_points", lambda group: [Broken()], raising=False
+        solvers,
+        "entry_points",
+        lambda group: [_Published("colmap", NoInfo)],
+        raising=False,
     )
+
     assert solvers.load_registered() == []
+    assert "does not satisfy PoseSolver" in solvers.load_failures()["colmap"]
+
+
+def test_a_broken_solver_is_not_reported_as_absent(monkeypatch):
+    """Absent and broken are different problems, and only one is an install away."""
+    monkeypatch.setattr(
+        solvers,
+        "entry_points",
+        lambda group: [
+            _Published("colmap", ImportError("libcolmap.so: cannot open shared object"))
+        ],
+        raising=False,
+    )
+    solvers.load_registered()
+
+    row = {candidate["name"]: candidate for candidate in solvers.survey()}["colmap"]
+    assert row["available"] is False
+    assert "installed but failed to load" in row["detail"]
+    assert "cannot open shared object" in row["detail"]
+    assert "not installed" not in row["detail"]
+
+
+def test_naming_a_broken_solver_refuses_rather_than_substituting(monkeypatch):
+    """A trajectory from somewhere other than where it was asked to come from.
+
+    Same rule `resolve` already applied to a missing solver, extended to one that
+    is present and unusable: the caller named it, so nobody else may answer.
+    """
+    monkeypatch.setattr(
+        solvers,
+        "entry_points",
+        lambda group: [_Published("colmap", RuntimeError("cuDNN not found"))],
+        raising=False,
+    )
+    solvers.load_registered()
+
+    with pytest.raises(solvers.SolverUnavailable) as raised:
+        solvers.resolve("colmap", [{"frame_id": 0}])
+
+    message = str(raised.value)
+    assert "COLMAP" in message
+    assert "failed to load" in message
+    assert "cuDNN not found" in message
 
 
 # ── the contract is checked, not assumed ────────────────────────────────────

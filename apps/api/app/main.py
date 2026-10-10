@@ -97,7 +97,12 @@ async def lifespan(app: FastAPI):
     # container start logs this, which is also how a restart becomes visible: a
     # second banner in the log is a second container.
     logger.info(
-        startup_report(settings, app.state.storage, routes=len(app.routes))
+        startup_report(
+            settings,
+            app.state.storage,
+            routes=len(app.routes),
+            registry=app.state.registry,
+        )
     )
     yield
 

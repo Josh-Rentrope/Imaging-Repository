@@ -21,6 +21,13 @@ def list_solvers() -> dict:
     return {
         "solvers": rows,
         "available": sorted(row["name"] for row in rows if row["available"]),
+        # Solvers that were published to this deployment and would not load.
+        # Separate from the survey because it answers a different question: that
+        # one says what can run, this says what was *meant* to and did not --
+        # which is the difference between a deployment that never had the private
+        # core and one where it is installed and broken.
+        "load_failures": solvers.load_failures(),
+        "discovery_error": solvers.discovery_error(),
         # The input shape is the thing a caller actually has to match against:
         # an unordered folder cannot be handed to a sequence solver.
         "shapes": [

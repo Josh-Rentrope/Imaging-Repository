@@ -24,7 +24,7 @@ from ..config import Settings
 from ..deps import get_config, get_job_store, get_registry, get_source_store, get_storage
 from ..jobs import JobStore
 from ..observability import segmenter_status, store_description, store_probe
-from ..pipeline import BackendRegistry
+from ..pipeline import BackendRegistry, solvers
 from ..sources import SourceStore
 from ..storage import Storage
 from ..tenancy import current_folder
@@ -72,6 +72,14 @@ def diagnostics(
             "jobs": len(job_store.list(limit=10_000)),
             "backends": [c.backend for c in registry.available()],
             "server_backend_registered": registry.has_server_backend(),
+            "server_backend_error": registry.server_backend_error(),
+        },
+        "solvers": {
+            "available": sorted(
+                row["name"] for row in solvers.survey() if row["available"]
+            ),
+            "load_failures": solvers.load_failures(),
+            "discovery_error": solvers.discovery_error(),
         },
     }
 

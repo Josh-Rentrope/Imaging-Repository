@@ -3,6 +3,7 @@
 from .interfaces import (
     DIAGNOSTIC_OPS,
     BackendId,
+    BackendUnavailable,
     Capabilities,
     Health,
     InferenceBackend,
@@ -19,6 +20,7 @@ __all__ = [
     "DIAGNOSTIC_OPS",
     "BackendId",
     "BackendRegistry",
+    "BackendUnavailable",
     "Capabilities",
     "Health",
     "InferenceBackend",

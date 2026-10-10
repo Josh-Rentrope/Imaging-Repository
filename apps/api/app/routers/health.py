@@ -27,5 +27,9 @@ def capabilities(
     return {
         "backends": [c.model_dump(mode="json") for c in registry.available()],
         "server_backend_registered": registry.has_server_backend(),
+        # Why it is not registered, when it was meant to be. `false` above means
+        # either "this deployment has no private core" or "it has one that will
+        # not load", and those are different problems.
+        "server_backend_error": registry.server_backend_error(),
         "diagnostic_ops_enabled": settings.enable_diagnostic_tasks,
     }

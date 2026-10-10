@@ -29,6 +29,8 @@ publishes them as entry points::
     [project.entry-points."bone_viewer.solvers"]
     colmap = "bone_viewer_core.solvers:ColmapSolver"
 
+**Absent and broken are different error modes.**
+
 This module is the register of what exists, what is installed, and what ran.
 """
 
@@ -166,6 +168,10 @@ CATALOGUE: dict[str, SolverInfo] = {
 
 _REGISTERED: dict[str, PoseSolver] = {}
 
+_BROKEN: dict[str, str] = {}
+
+_DISCOVERY_ERROR: str | None = None
+
 
 def register(solver: PoseSolver) -> None:
     """Add an implementation. Called by entry-point discovery, or by a test.
@@ -180,23 +186,67 @@ def register(solver: PoseSolver) -> None:
 
 
 def load_registered() -> list[str]:
-    """Discover solvers published by other distributions. Absent is normal."""
+    """Discover solvers published by other distributions. Absent is normal.
+
+    Returns the names that loaded, which is why a broken one is not in the result:
+    the caller's question is what can run here. What could not load is recorded in
+    `_BROKEN` instead, where `survey()` and `resolve()` can report it as the
+    different problem it is. See `load_failures()`.
+    """
+    global _DISCOVERY_ERROR
     loaded: list[str] = []
+    _BROKEN.clear()
+    _DISCOVERY_ERROR = None
+
     try:
         discovered = entry_points(group=ENTRY_POINT_GROUP)
-    except Exception:
+    except Exception as exc:
+        _DISCOVERY_ERROR = f"{type(exc).__name__}: {exc}"
         return loaded
 
     for entry_point in discovered:
         try:
             solver = entry_point.load()()
-        except Exception:
-            # A solver that will not import is not a reason to fail the app; it
-            # simply does not appear as available, which is the honest answer.
+            # Conformance is checked here rather than left to the first call.
+            # `PoseSolver` is runtime_checkable, so an object missing `available`
+            # would otherwise register cleanly and then fail per-request inside
+            # `survey()` 
+            if not isinstance(solver, PoseSolver):
+                raise TypeError(
+                    f"{entry_point.value} does not satisfy PoseSolver: it needs "
+                    "`info`, `available()` and `solve()`"
+                )
+            if not isinstance(solver.info, SolverInfo):
+                raise TypeError(
+                    f"{entry_point.value}.info is "
+                    f"{type(solver.info).__name__}, not SolverInfo"
+                )
+            # Inside the try on purpose. `register` reads `solver.info.name`, so a
+            # solver that loads but carries malformed metadata would raise out of
+            # this loop and out of startup, taking the whole app down over a
+            # plugin 
+            register(solver)
+        except Exception as exc:
+            # A solver that will not load is not a reason to fail the app. It is a
+            # reason to say so: absent and broken look identical from the outside,
+            # and only one of them is fixed by installing something.
+            _BROKEN[entry_point.name] = f"{type(exc).__name__}: {exc}"
             continue
-        register(solver)
         loaded.append(entry_point.name)
     return loaded
+
+
+def load_failures() -> dict[str, str]:
+    """Solvers that were published to this deployment and could not be loaded.
+
+    Distinct from `survey()`, which reports what can run. 
+    """
+    return dict(_BROKEN)
+
+
+def discovery_error() -> str | None:
+    """Why entry-point discovery itself failed, if it did."""
+    return _DISCOVERY_ERROR
 
 
 def get(name: str) -> PoseSolver | None:
@@ -218,9 +268,17 @@ def survey() -> list[dict[str, Any]]:
     for name, info in CATALOGUE.items():
         solver = _REGISTERED.get(name)
         if solver is None:
-            available, detail = False, (
-                "not installed in this deployment" if name != "device" else "not applicable"
-            )
+            broken = _BROKEN.get(name)
+            if broken is not None:
+                # Present and unusable, which needs a different fix from absent.
+                # Reported as the load error itself so the operator sees what
+                # actually went wrong instead of going hunting for an install that
+                # is already there.
+                available, detail = False, f"installed but failed to load: {broken}"
+            else:
+                available, detail = False, (
+                    "not installed in this deployment" if name != "device" else "not applicable"
+                )
         else:
             try:
                 available, detail = solver.available()
@@ -290,6 +348,13 @@ def resolve(name: str | None, frames: Iterable[dict[str, Any]]) -> str | None:
             if shape in info.accepts and candidate in _REGISTERED
         ]
         return installed[0] if installed else None
+
+    broken = _BROKEN.get(name)
+    if broken is not None:
+        tool = CATALOGUE[name].tool if name in CATALOGUE else name
+        raise SolverUnavailable(
+            f"{tool} is installed in this deployment but failed to load: {broken}"
+        )
 
     if name not in CATALOGUE:
         known = ", ".join(sorted(CATALOGUE))

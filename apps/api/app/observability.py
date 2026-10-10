@@ -98,7 +98,36 @@ def segmenter_status() -> str:
     return f"available ({binary})" + (f" info={' '.join(info)}" if info else " info=NONE")
 
 
-def startup_report(settings: Settings, storage: Storage, routes: int) -> str:
+def core_status(registry: object | None) -> str:
+    """Whether the private core is here, and why not when it is not."""
+    if registry is None:
+        return "unknown"
+    if registry.has_server_backend():  # type: ignore[attr-defined]
+        return "private core installed"
+    error = registry.server_backend_error()  # type: ignore[attr-defined]
+    if error:
+        return f"private core BROKEN -- {error}"
+    return "absent (public fixture only)"
+
+
+def solvers_status() -> str:
+    """Which camera-pose solvers can run here, and what was meant to and cannot."""
+    from .pipeline import solvers
+
+    available = sorted(row["name"] for row in solvers.survey() if row["available"])
+    parts = [", ".join(available) if available else "none installed"]
+    failures = solvers.load_failures()
+    if failures:
+        listed = ", ".join(f"{name} ({why})" for name, why in sorted(failures.items()))
+        parts.append(f"BROKEN: {listed}")
+    if solvers.discovery_error():
+        parts.append(f"discovery failed: {solvers.discovery_error()}")
+    return "   ".join(parts)
+
+
+def startup_report(
+    settings: Settings, storage: Storage, routes: int, registry: object | None = None
+) -> str:
     """The effective configuration, as one multi-line log entry.
 
     ASCII only. Logs are read through consoles, log collectors and ticket
@@ -122,6 +151,8 @@ def startup_report(settings: Settings, storage: Storage, routes: int) -> str:
         f" diagnostic_ops={settings.enable_diagnostic_tasks}",
         f"  recordings   {settings.recordings_dir}",
         f"  segmenter    {segmenter_status()}",
+        f"  core         {core_status(registry)}",
+        f"  solvers      {solvers_status()}",
         f"  routes       {routes}",
         "=" * 65,
     ]

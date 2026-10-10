@@ -30,6 +30,7 @@ from .observability import logger
 from .pipeline import (
     DIAGNOSTIC_OPS,
     BackendRegistry,
+    BackendUnavailable,
     InferenceRequest,
     OpNotSupported,
 )
@@ -329,7 +330,10 @@ class JobStore:
                 result=outcome.envelope,
                 warnings=list(outcome.envelope.get("warnings") or []),
             )
-        except OpNotSupported as exc:
+        except (BackendUnavailable, OpNotSupported) as exc:
+            # Both are refusals this pipeline made deliberately, and both were
+            # written to be read by whoever asked for the job. Caught together so
+            # neither arrives prefixed with its class name.
             self._replace(job.job_id, status=JobStatus.FAILED, error=str(exc))
         except Exception as exc:  # surface any backend failure to the caller
             self._replace(

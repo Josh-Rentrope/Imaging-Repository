@@ -102,3 +102,19 @@ class OpNotSupported(Exception):
     def __init__(self, op: str) -> None:
         super().__init__(f"no backend advertises operation {op!r}")
         self.op = op
+
+
+class BackendUnavailable(Exception):
+    """A backend was named explicitly and this deployment cannot provide it.
+
+    The message is user-facing; `detail` carries the underlying reason when one
+    is known.
+    """
+
+    def __init__(self, name: str, detail: str | None = None) -> None:
+        message = f"backend {name!r} is not available in this deployment"
+        if detail:
+            message = f"{message}: {detail}"
+        super().__init__(message)
+        self.name = name
+        self.detail = detail
