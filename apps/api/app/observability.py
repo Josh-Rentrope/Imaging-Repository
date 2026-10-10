@@ -111,17 +111,25 @@ def core_status(registry: object | None) -> str:
 
 
 def solvers_status() -> str:
-    """Which camera-pose solvers can run here, and what was meant to and cannot."""
+    """Runnable, registered-but-unavailable, and failed-to-load, kept apart."""
     from .pipeline import solvers
 
-    available = sorted(row["name"] for row in solvers.survey() if row["available"])
-    parts = [", ".join(available) if available else "none installed"]
+    rows = solvers.survey()
+    runnable = sorted(row["name"] for row in rows if row["available"])
+    parts = ["runnable: " + (", ".join(runnable) if runnable else "none")]
+
+    present = sorted(set(solvers.registered()) - set(runnable))
+    if present:
+        parts.append("present but unavailable: " + ", ".join(present))
+
     failures = solvers.load_failures()
     if failures:
         listed = ", ".join(f"{name} ({why})" for name, why in sorted(failures.items()))
         parts.append(f"BROKEN: {listed}")
+
     if solvers.discovery_error():
         parts.append(f"discovery failed: {solvers.discovery_error()}")
+
     return "   ".join(parts)
 
 
@@ -130,11 +138,8 @@ def startup_report(
 ) -> str:
     """The effective configuration, as one multi-line log entry.
 
-    ASCII only. Logs are read through consoles, log collectors and ticket
-    attachments, and a startup banner that raises `UnicodeEncodeError` on a
-    cp1252 console is a banner that fails on exactly the machine someone is
-    trying to diagnose. This was written with box-drawing rules first and they
-    did precisely that.
+    ASCII only: box-drawing characters raised UnicodeEncodeError on a cp1252
+    console, which is the machine someone is usually diagnosing.
     """
     base = getattr(storage, "_base", storage)
     lines = [

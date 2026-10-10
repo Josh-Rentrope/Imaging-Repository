@@ -248,15 +248,10 @@ def test_a_solver_that_claims_to_be_available_and_then_is_not(client, installed,
 
 
 class _Published:
-    """An entry point standing in for one, without needing a real module.
+    """An entry point double. `target` is what `load()` returns, which the loader
+    then calls -- an entry point value is `module:Class`, so pass the class.
 
-    `target` is what `load()` returns, which the loader then *calls* -- an entry
-    point value is `module:Class`, so a class is the faithful stand-in and the
-    loader's `load()()` is what instantiates it.
-
-    Carries `name` and `value` because the loader reads both while reporting a
-    failure. A double that omits them raises inside the handler that is meant to
-    be doing the reporting, and the test then proves nothing about the loader.
+    Needs `name` and `value`: the loader reads both while reporting a failure.
     """
 
     def __init__(self, name: str, target: object) -> None:
@@ -272,15 +267,8 @@ class _Published:
 
 @pytest.fixture(autouse=True)
 def clean_discovery():
-    """Restore the module-global discovery state after each test.
-
-    `load_registered()` writes into `_BROKEN` in place, so a test that publishes
-    a broken entry point would otherwise leave it recorded for everything that
-    runs afterwards -- and the symptom would be a failure in a test that never
-    went near discovery.
-
-    Autouse, because forgetting it is silent in one direction and confusing in
-    the other.
+    """Restore discovery state. `load_registered()` writes `_BROKEN` in place, so
+    without this a broken entry point leaks into every later test.
     """
     saved = dict(solvers._BROKEN)
     saved_error = solvers.discovery_error()
@@ -292,10 +280,8 @@ def clean_discovery():
 
 
 def test_discovery_of_a_broken_entry_point_does_not_stop_a_run(monkeypatch):
-    """A solver that will not import is unavailable, not fatal.
-
-    A real `EntryPoint` rather than a double: it is the class the loader is
-    actually handed, so a change to what the loader reads off it fails here.
+    """A solver that will not import is unavailable, not fatal. Uses the real
+    `EntryPoint`, which is what the loader is actually handed.
     """
     from importlib.metadata import EntryPoint
 
@@ -307,17 +293,14 @@ def test_discovery_of_a_broken_entry_point_does_not_stop_a_run(monkeypatch):
     monkeypatch.setattr(solvers, "entry_points", lambda group: [broken], raising=False)
 
     assert solvers.load_registered() == []
-    # Reported, and reported as itself. "Nothing loaded" and "something is
-    # installed and will not load" used to be the same answer.
+    # "Nothing loaded" and "something is installed and will not load" used to be
+    # the same answer.
     assert "ModuleNotFoundError" in solvers.load_failures()["colmap"]
 
 
 def test_a_solver_that_loads_but_carries_no_info_does_not_crash_startup(monkeypatch):
-    """`register()` reads `solver.info.name`, and it used to run outside the try.
-
-    So an entry point returning an object without `info` raised out of the
-    lifespan and took the app down -- over a plugin, which is precisely what an
-    unusable plugin is supposed to be harmless as.
+    """`register()` reads `solver.info.name` and used to run outside the try, so
+    an object without `info` took the app down at startup.
     """
 
     class NoInfo:
@@ -357,12 +340,44 @@ def test_a_broken_solver_is_not_reported_as_absent(monkeypatch):
     assert "not installed" not in row["detail"]
 
 
-def test_naming_a_broken_solver_refuses_rather_than_substituting(monkeypatch):
-    """A trajectory from somewhere other than where it was asked to come from.
-
-    Same rule `resolve` already applied to a missing solver, extended to one that
-    is present and unusable: the caller named it, so nobody else may answer.
+def test_a_registered_solver_that_cannot_run_is_not_reported_as_absent(client, monkeypatch):
+    """Registered and unavailable is not the same as not installed. The private
+    core can be installed with the binary it drives missing.
     """
+
+    class NoBinary:
+        info = solvers.SolverInfo(
+            name="colmap",
+            tool="COLMAP",
+            description="Solves camera positions from a set of photographs.",
+            algorithm="structure-from-motion",
+            accepts=frozenset({solvers.InputShape.UNORDERED}),
+            licence="BSD-3-Clause",
+        )
+
+        def available(self):
+            return False, "no colmap binary on this machine"
+
+        def solve(self, frames, params):
+            raise AssertionError("solve() must not be reached while unavailable")
+
+    monkeypatch.setitem(solvers._REGISTERED, "colmap", NoBinary())
+    monkeypatch.setitem(solvers.CATALOGUE, "colmap", NoBinary.info)
+
+    payload = client.get("/solvers").json()
+
+    assert payload["registered"] == ["colmap"]
+    assert "colmap" not in payload["available"]
+    # Registered and unusable is its own state, not a failure to load.
+    assert payload["load_failures"] == {}
+
+    row = {candidate["name"]: candidate for candidate in payload["solvers"]}["colmap"]
+    assert row["available"] is False
+    assert row["detail"] == "no colmap binary on this machine"
+
+
+def test_naming_a_broken_solver_refuses_rather_than_substituting(monkeypatch):
+    """A named solver that cannot run is refused, not substituted."""
     monkeypatch.setattr(
         solvers,
         "entry_points",

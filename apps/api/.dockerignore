@@ -24,3 +24,6 @@ Dockerfile
 .dockerignore
 scripts/
 recordings/
+
+# `vendor/` is deliberately NOT excluded: it carries the private core wheel for
+# WITH_PRIVATE_CORE=1, and the COPY that fetches it fails if this file hides it.

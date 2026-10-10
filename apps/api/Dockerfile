@@ -1,14 +1,21 @@
 # The API, as a container.
 #
-# Two things here are not the usual shape, and both are deliberate:
+# Three things here are not the usual shape, and all are deliberate:
 #
 #   * **The segmenter is opt-in.** `WITH_SEGMENTER=1` installs TotalSegmentator
 #     and bakes in its weights; the default is off, because App Platform's own
 #     documented limits make the full install unsafe to host there. See below.
 #
+#   * **The private core is opt-in.** `WITH_PRIVATE_CORE=1` installs a wheel from
+#     `vendor/`, built from a separate private repository. Off by default,
+#     because a checkout of this repo has no such wheel -- and because the
+#     private core is reconstructively the interesting half, so an image that
+#     carries it should be a decision rather than an accident.
+#
 #   * **The build context is `apps/api`**, so the `.dockerignore` beside this file
 #     is load-bearing: without it the local development store (`.data`, gigabytes
-#     of DICOM) would be uploaded into every build.
+#     of DICOM) would be uploaded into every build. Note that it deliberately does
+#     NOT exclude `vendor/`, which the private core build has to reach.
 #
 # Run locally:
 #     docker build -t bone-viewer-api apps/api
@@ -16,6 +23,10 @@
 #
 # With the segmenter:
 #     docker build --build-arg WITH_SEGMENTER=1 -t bone-viewer-api apps/api
+#
+# With both:
+#     docker build --build-arg WITH_SEGMENTER=1 --build-arg WITH_PRIVATE_CORE=1 \
+#       -t bone-viewer-api apps/api
 
 FROM python:3.12-slim
 
@@ -93,7 +104,45 @@ RUN if [ "$WITH_SEGMENTER" = "1" ]; then \
       echo "segmenter disabled; build with --build-arg WITH_SEGMENTER=1 to include it" ; \
     fi
 
+# ── the private core, off by default ────────────────────────────────────────
+#
+# Wheel built from the private core repo, dropped in `vendor/` (gitignored, and
+# deliberately not dockerignored). Docker cannot COPY from outside the build
+# context, so it has to arrive as a file either way.
+#
+# Installs Python glue only. A `colmap` binary, weights and scratch disk are
+# provisioned separately; the startup banner reports what actually resolved.
+COPY vendor /opt/vendor
+
+ARG WITH_PRIVATE_CORE=0
+
+RUN if [ "$WITH_PRIVATE_CORE" = "1" ]; then \
+      set -e ; \
+      wheel=$(ls /opt/vendor/*.whl 2>/dev/null | head -n 1) ; \
+      if [ -z "$wheel" ]; then \
+        echo "WITH_PRIVATE_CORE=1 but no wheel is present in vendor/." >&2 ; \
+        echo "Build one first -- tools/make_stub_core.py here for a throwaway" >&2 ; \
+        echo "stub, tools/build_wheel.py in the private core repo for the real one." >&2 ; \
+        exit 1 ; \
+      fi ; \
+      echo "installing private core from $wheel" ; \
+      uv pip install --python /opt/venv/bin/python --no-deps "$wheel" ; \
+      python -c "import importlib.metadata as m; g=['bone_viewer.solvers','bone_viewer.backends']; f={k:[e.name for e in m.entry_points(group=k)] for k in g}; assert all(f.values()), 'the private core published no entry points: %s' % f; print('private core entry points:', f)" ; \
+    else \
+      echo "private core disabled; build with --build-arg WITH_PRIVATE_CORE=1 to include it" ; \
+    fi
+
+# ── the API itself, as a package ────────────────────────────────────────────
+#
+# `--no-install-project` above leaves this project out so that code edits do not
+# rebuild the dependency layer. The private core imports the public contracts
+# (`app.pipeline.solvers.SolverInfo`, `app.pipeline.interfaces.InferenceBackend`),
+# so they must be importable outside `/srv` -- not only via uvicorn's
+# working-directory entry on `sys.path`.
+#
+# `--no-deps`: the sync above already installed everything.
 COPY app ./app
+RUN uv pip install --python /opt/venv/bin/python --no-deps .
 
 # Nothing in the image needs to be root, but everything needs to be writable by
 # whatever runs it: the staging directory `SourceStore.materialize` needs for the

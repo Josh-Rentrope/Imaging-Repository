@@ -1,11 +1,10 @@
-"""The backend seam: who answers a job, and what happens when the private core
+"""Backend selection: who answers a job, and what happens when the private core
 is meant to be here and is not.
 
 The failure this guards against is not a crash. It is a job that asked for the
-private backend, quietly ran against the fixture instead, and came back with an
-envelope holding a mesh and measurements. Nothing fails, nothing is logged, and
-the geometry is synthetic -- which is why what is asserted below is a *refusal*
-rather than merely an error.
+private backend, quietly ran against the fixture instead, and came back with a
+mesh and measurements in the envelope. Nothing fails, nothing is logged, and the
+geometry is synthetic.
 """
 
 from __future__ import annotations
@@ -189,7 +188,7 @@ def test_diagnostics_reports_a_core_that_was_never_here(client):
 
     assert payload["loaded"]["server_backend_registered"] is False
     assert payload["loaded"]["server_backend_error"] is None
-    # Both plugin seams are on the diagnostics response, because both can be
+    # Both extension points are on the diagnostics response, because both can be
     # broken in a way that still looks like a working deployment.
     assert payload["solvers"]["available"] == []
     assert payload["solvers"]["load_failures"] == {}

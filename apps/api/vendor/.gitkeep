@@ -1,0 +1,6 @@
+# Holds a wheel built from the private core repo.
+#
+# Empty in a checkout of this repo. The Dockerfile's COPY vendor fails on a
+# missing path, which is the only reason this file exists.
+#
+# Build one: uv run python tools/make_stub_core.py   (throwaway, for testing)

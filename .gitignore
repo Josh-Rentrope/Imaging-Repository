@@ -92,6 +92,17 @@ desktop.ini
 !.vscode/extensions.json
 *.swp
 
+# ── Private core ─────────────────────────────────────────────────────────────
+# Wheel built from the private core repo. Build input, not source: committing one
+# publishes the reconstruction, and `git log` keeps it after deletion.
+apps/api/vendor/*
+# Kept so the directory exists in a fresh clone -- the Dockerfile's COPY vendor
+# fails on a missing path.
+!apps/api/vendor/.gitkeep
+*.whl
+
+apps/api/.data
+
 # ── Local deploy state ───────────────────────────────────────────────────────
 # deploys.lock IS committed (it pins the model image digest).
 # Local overrides are not.
