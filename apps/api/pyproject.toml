@@ -12,6 +12,11 @@ dependencies = [
     "numpy>=2.5.3",
     "scikit-image>=0.26.0",
     "nibabel>=5.4.2",
+    "pillow>=11.0",
+    # Phone originals are HEIC, and nothing in a browser except Safari can render
+    # one. Converted on the way in, so a folder of iPhone photographs works the
+    # same as a folder of anything else.
+    "pillow-heif>=1.0",
     # For the Spaces backend. A main dependency rather than an extra, because
     # the deployment uses it: an optional import that is missing in production
     # is a failure discovered at deploy time instead of at review time.
