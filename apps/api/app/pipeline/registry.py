@@ -50,7 +50,12 @@ class BackendRegistry:
             self._backends[BackendId.ONDEVICE] = ondevice
 
         try:
-            core = load_server_backend()
+            # Same arguments FixtureBackend gets, so the two are interchangeable.
+            core = load_server_backend(
+                storage=self._storage,
+                source_store=self._source_store,
+                recordings_dir=self._recordings_dir,
+            )
         except BackendLoadError as exc:
             self._server_error = str(exc)
         else:

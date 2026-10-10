@@ -36,6 +36,20 @@ def _published(name: str, value: str) -> EntryPoint:
     return EntryPoint(name=name, value=value, group=server_module.ENTRY_POINT_GROUP)
 
 
+class _Yields:
+    """An entry point double that returns `target` from `load()`, with no module
+    on disk. `load()` returns it and the loader then calls it, so pass a class.
+    """
+
+    def __init__(self, name: str, target: object) -> None:
+        self.name = name
+        self.value = f"tests.stubs:{name}"
+        self._target = target
+
+    def load(self):
+        return self._target
+
+
 @pytest.fixture()
 def broken_core(monkeypatch):
     """Publish a server backend that will not load, to anything that builds one."""
@@ -82,6 +96,53 @@ def test_a_private_core_that_will_not_load_keeps_its_reason(tmp_path, broken_cor
     detail = registry.server_backend_error()
     assert detail is not None
     assert "ModuleNotFoundError" in detail
+
+
+# ── the constructor contract ────────────────────────────────────────────────
+
+
+def test_the_private_backend_is_constructed_with_the_store(tmp_path, monkeypatch):
+    """Without these it cannot read the uploaded sources or write what it made."""
+    seen: dict = {}
+
+    class Backend:
+        def __init__(self, storage=None, source_store=None, recordings_dir=None):
+            seen["storage"] = storage
+            seen["source_store"] = source_store
+            seen["recordings_dir"] = recordings_dir
+
+    monkeypatch.setattr(
+        server_module,
+        "entry_points",
+        lambda group: [_Yields("server", Backend)],
+        raising=False,
+    )
+
+    registry = BackendRegistry(storage=LocalStorage(tmp_path), recordings_dir=tmp_path / "rec")
+
+    assert registry.has_server_backend() is True
+    assert seen["storage"] is not None
+    assert seen["recordings_dir"] == tmp_path / "rec"
+
+
+def test_a_backend_that_rejects_those_arguments_is_reported(tmp_path, monkeypatch):
+    """Same constructor contract as `FixtureBackend`, and a mismatch is not silent."""
+
+    class Wrong:
+        def __init__(self):  # takes nothing, on purpose
+            pass
+
+    monkeypatch.setattr(
+        server_module,
+        "entry_points",
+        lambda group: [_Yields("server", Wrong)],
+        raising=False,
+    )
+
+    registry = BackendRegistry(storage=LocalStorage(tmp_path))
+
+    assert registry.has_server_backend() is False
+    assert "unexpected keyword" in (registry.server_backend_error() or "")
 
 
 # ── a named backend may not be substituted ──────────────────────────────────

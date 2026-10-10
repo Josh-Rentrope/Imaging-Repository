@@ -487,7 +487,7 @@ def _estimate_poses(envelope: dict, params: dict, context: dict) -> None:
             "capture."
         )
     else:
-        outcome = _run_solver(solver, frames, params)
+        outcome = _run_solver(solver, frames, params, context)
         geometry["pose_solver"] = solver
         geometry["pose_source"] = "sfm"
         geometry["poses_solved"] = len(outcome.poses)
@@ -508,11 +508,13 @@ def _estimate_poses(envelope: dict, params: dict, context: dict) -> None:
         record["licence"] = info.licence
 
 
-def _run_solver(name: str, frames: list[dict[str, Any]], params: dict) -> Any:
+def _run_solver(
+    name: str, frames: list[dict[str, Any]], params: dict, context: dict
+) -> Any:
     solver = solvers.get(name)
     if solver is None:  # resolve() already refused this; belt and braces
         raise solvers.SolverUnavailable(f"{name} is not installed in this deployment")
-    return solver.solve(frames, params)
+    return solver.solve(frames, params, context)
 
 
 def _px2tooth(envelope: dict, params: dict, context: dict) -> None:

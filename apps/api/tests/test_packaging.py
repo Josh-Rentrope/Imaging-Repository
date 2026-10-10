@@ -1,9 +1,10 @@
 """Packaging rules that keep the private core out of the public repo.
 
 Asserts on `.gitignore` behaviour, not on `.gitignore` text. Uses
-`git ls-files --others --exclude-standard` ("would git add this?") rather than
-`git check-ignore -q`, which exits zero for a path matched by a negation
-(`!apps/api/vendor/.gitkeep`) and so reads as "ignored".
+`git ls-files --cached --others --exclude-standard` -- "does git track this, or
+would it stage it?" -- rather than `git check-ignore -q`, which exits zero for a
+path matched by a negation (`!apps/api/vendor/.gitkeep`) and so reads as
+"ignored".
 """
 
 from __future__ import annotations
@@ -18,10 +19,14 @@ REPO = Path(__file__).resolve().parents[3]
 VENDOR = "apps/api/vendor/"
 
 
-def _addable(pattern: str) -> list[str]:
-    """Files under `pattern` that git would stage."""
+def _visible(pattern: str) -> list[str]:
+    """Files under `pattern` git tracks or would stage.
+
+    Both, not just the untracked: a committed file is out of `--others` and is
+    exactly what these tests are looking for.
+    """
     result = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard", pattern],
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", pattern],
         cwd=REPO,
         capture_output=True,
         text=True,
@@ -39,7 +44,7 @@ def require_git():
 
 def test_a_core_wheel_cannot_be_committed():
     """A wheel here is a build input, not source. `git log` keeps it after deletion."""
-    wheels = [name for name in _addable(VENDOR) if name.endswith(".whl")]
+    wheels = [name for name in _visible(VENDOR) if name.endswith(".whl")]
 
     assert not wheels, (
         f"a wheel in {VENDOR} is not ignored ({wheels}). Committing one publishes "
@@ -49,7 +54,7 @@ def test_a_core_wheel_cannot_be_committed():
 
 def test_the_vendor_directory_survives_a_clone():
     """`COPY vendor` fails on a missing path, so the directory must survive a clone."""
-    assert f"{VENDOR}.gitkeep" in _addable(VENDOR), (
+    assert f"{VENDOR}.gitkeep" in _visible(VENDOR), (
         "vendor/.gitkeep is not tracked, so the directory would not exist in a "
         "fresh clone and the Dockerfile's COPY would fail"
     )

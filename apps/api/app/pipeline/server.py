@@ -34,11 +34,15 @@ class BackendLoadError(Exception):
     """
 
 
-def load_server_backend() -> object | None:
+def load_server_backend(**injected: object) -> object | None:
     """The private backend, or None when nothing published one.
 
     Raises `BackendLoadError` when one *was* published and could not be built.
     The two outcomes are deliberately not collapsed into a single None.
+
+    `injected` goes to the constructor: the same arguments `FixtureBackend`
+    receives, so the two are interchangeable. A backend with no store handle
+    cannot read the uploaded sources or write what it produced.
     """
     try:
         discovered = entry_points(group=ENTRY_POINT_GROUP)
@@ -56,7 +60,7 @@ def load_server_backend() -> object | None:
     failures: list[str] = []
     for entry_point in candidates:
         try:
-            return entry_point.load()()
+            return entry_point.load()(**injected)
         except Exception as exc:
             failures.append(f"{entry_point.value}: {type(exc).__name__}: {exc}")
 

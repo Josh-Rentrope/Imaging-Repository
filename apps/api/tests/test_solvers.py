@@ -40,7 +40,7 @@ class StandIn:
     def available(self):
         return True, None
 
-    def solve(self, frames, params):
+    def solve(self, frames, params, context=None):
         return solvers.PoseOutcome(
             poses=[{"frame_id": frame["frame_id"]} for frame in frames], **self._outcome
         )
@@ -237,7 +237,7 @@ def test_a_solver_that_claims_to_be_available_and_then_is_not(client, installed,
     """`available()` is advisory; a solver that fails anyway fails the job."""
     solver = installed(StandIn("hloc", "hloc", "Apache-2.0"))
 
-    def explode(frames, params):
+    def explode(frames, params, context):
         raise RuntimeError("CUDA out of memory")
 
     monkeypatch.setattr(solver, "solve", explode)
@@ -340,6 +340,29 @@ def test_a_broken_solver_is_not_reported_as_absent(monkeypatch):
     assert "not installed" not in row["detail"]
 
 
+def test_a_solver_is_given_the_store_and_the_capture(client, installed):
+    """`frames` carries opaque `image_ref` values, so a solver cannot reach the
+    pixels without the store. A solver that quietly gets None here cannot read
+    its own input, and would fail somewhere less obvious.
+    """
+    seen: dict = {}
+
+    class Watcher(StandIn):
+        def solve(self, frames, params, context):
+            seen.update(context)
+            return super().solve(frames, params, context)
+
+    solver = installed(Watcher("colmap", "COLMAP", "BSD-3-Clause"))
+    run(
+        client,
+        [{"op": "estimate_poses", "params": {"solver": solver.info.name}}],
+        photo_capture(),
+    )
+
+    assert set(seen) >= {"capture", "storage", "sources"}
+    assert seen["storage"] is not None
+
+
 def test_a_registered_solver_that_cannot_run_is_not_reported_as_absent(client, monkeypatch):
     """Registered and unavailable is not the same as not installed. The private
     core can be installed with the binary it drives missing.
@@ -358,7 +381,7 @@ def test_a_registered_solver_that_cannot_run_is_not_reported_as_absent(client, m
         def available(self):
             return False, "no colmap binary on this machine"
 
-        def solve(self, frames, params):
+        def solve(self, frames, params, context):
             raise AssertionError("solve() must not be reached while unavailable")
 
     monkeypatch.setitem(solvers._REGISTERED, "colmap", NoBinary())

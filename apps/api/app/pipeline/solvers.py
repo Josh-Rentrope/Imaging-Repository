@@ -91,7 +91,16 @@ class PoseSolver(Protocol):
         """(can it run, why not when it cannot). Checked before it is asked to."""
         ...
 
-    def solve(self, frames: list[dict[str, Any]], params: dict[str, Any]) -> PoseOutcome: ...
+    def solve(
+        self, frames: list[dict[str, Any]], params: dict[str, Any], context: dict[str, Any]
+    ) -> PoseOutcome:
+        """Solve for camera positions.
+
+        `context` carries `capture`, `storage` and `sources`. A solver needs it
+        because `frames` holds `image_ref` values -- opaque store references, not
+        readable paths -- so reaching the pixels means going through the store.
+        """
+        ...
 
 
 #: Every framework this pipeline knows how to talk to, whether or not it is
