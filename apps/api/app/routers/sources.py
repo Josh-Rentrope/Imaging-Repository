@@ -8,6 +8,8 @@ list, which is what makes uploads persist across reloads without a session.
 from __future__ import annotations
 
 import io
+import tempfile
+from pathlib import Path
 from typing import Annotated
 
 import numpy as np
@@ -15,9 +17,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from fastapi.responses import Response
 
 from ..deps import get_source_store
+from ..ingest import stage_uploads
 from ..sources import (
-    MAX_FILES,
-    MAX_TOTAL_BYTES,
     SourceRecord,
     SourceStore,
     SourceSummary,
@@ -28,29 +29,6 @@ from ..sources import (
 router = APIRouter(prefix="/sources", tags=["sources"])
 
 
-async def _read_uploads(files: list[UploadFile]) -> list[tuple[str, bytes]]:
-    if not files:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="no files uploaded")
-    if len(files) > MAX_FILES:
-        raise HTTPException(
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"{len(files)} files exceeds the {MAX_FILES}-file limit",
-        )
-
-    payloads: list[tuple[str, bytes]] = []
-    total = 0
-    for upload in files:
-        data = await upload.read()
-        total += len(data)
-        if total > MAX_TOTAL_BYTES:
-            raise HTTPException(
-                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"upload exceeds {MAX_TOTAL_BYTES // 1024**3} GiB",
-            )
-        payloads.append((upload.filename or "unnamed", data))
-    return payloads
-
-
 @router.post("/dicom", response_model=SourceSummary, status_code=status.HTTP_201_CREATED)
 async def upload_dicom(
     store: Annotated[SourceStore, Depends(get_source_store)],
@@ -59,7 +37,10 @@ async def upload_dicom(
     set_id: Annotated[str, Form()] = "",
     name: Annotated[str | None, Form()] = None,
 ) -> SourceSummary:
-    record = store.create_dicom(await _read_uploads(files), workspace_id, set_id, name)
+    """A DICOM series. Accepts loose files, a zip, or a folder's worth of either."""
+    with tempfile.TemporaryDirectory(prefix="bone-viewer-upload-") as staging:
+        staged = await stage_uploads(files, Path(staging))
+        record = store.create_dicom(staged, workspace_id, set_id, name)
     return to_summary(record)
 
 
@@ -71,7 +52,10 @@ async def upload_images(
     set_id: Annotated[str, Form()] = "",
     name: Annotated[str | None, Form()] = None,
 ) -> SourceSummary:
-    record = store.create_images(await _read_uploads(files), workspace_id, set_id, name)
+    """Photographs. The same three ways in, and the same result for all of them."""
+    with tempfile.TemporaryDirectory(prefix="bone-viewer-upload-") as staging:
+        staged = await stage_uploads(files, Path(staging))
+        record = store.create_images(staged, workspace_id, set_id, name)
     return to_summary(record)
 
 
@@ -125,6 +109,11 @@ _MEDIA_TYPES = {
     ".bmp": "image/bmp",
     ".tif": "image/tiff",
     ".tiff": "image/tiff",
+    # Staging converts these on the way in, so nothing should still be one. Kept
+    # so that a conversion that somehow did not happen is served as what it is
+    # rather than as an octet-stream, which draws as nothing at all.
+    ".heic": "image/heic",
+    ".heif": "image/heif",
 }
 
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -11,6 +13,7 @@ from pydantic import BaseModel, Field
 from ..config import Settings
 from ..deps import get_config, get_source_store
 from ..fetch import RemoteError, fetch_dataset, origin_of
+from ..ingest import stage_payloads
 from ..samples import catalogue
 from ..sources import SourceStore, to_summary
 
@@ -105,32 +108,41 @@ def import_remote(
     kind = asked or detection.kind
     fallback = request.name or origin_of(request.url).rsplit("/", 1)[-1] or "Remote dataset"
 
-    try:
-        if kind == "dicom":
-            record = store.create_dicom(files, request.workspace_id, request.set_id, fallback)
-            if record.headerless:
-                # Not one file carried a DICOM header, so this really is the
-                # other kind of source and reading it as DICOM was wrong. The
-                # test is `headerless` and deliberately not `renderable`: a
-                # three-view chest X-ray and a mammogram are DICOM with no
-                # volume to assemble, and treating that as a misdetection threw
-                # away their headers and their modality to make them photographs.
-                #
-                # The DICOM record was persisted by `create_dicom` before we
-                # could look at it, so it is removed here. Leaving it would put a
-                # source in the list that no response ever mentioned — one import
-                # producing two entries, the wrong-looking one being the one
-                # nobody was told about.
-                store.delete(record.source_id)
-                record = store.create_images(files, request.workspace_id, request.set_id, fallback)
-                kind = "images"
-        else:
-            record = store.create_images(files, request.workspace_id, request.set_id, fallback)
-    except Exception as exc:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"that dataset could not be read: {exc}",
-        ) from exc
+    # Staged the same way an upload is. A fetched dataset and a dropped folder
+    # are the same thing by the time the store sees them, which is what keeps the
+    # two paths from drifting into different behaviour.
+    with tempfile.TemporaryDirectory(prefix="bone-viewer-remote-") as staging:
+        staged = stage_payloads(files, Path(staging))
+        try:
+            if kind == "dicom":
+                record = store.create_dicom(staged, request.workspace_id, request.set_id, fallback)
+                if record.headerless:
+                    # Not one file carried a DICOM header, so this really is the
+                    # other kind of source and reading it as DICOM was wrong. The
+                    # test is `headerless` and deliberately not `renderable`: a
+                    # three-view chest X-ray and a mammogram are DICOM with no
+                    # volume to assemble, and treating that as a misdetection threw
+                    # away their headers and their modality to make them photographs.
+                    #
+                    # The DICOM record was persisted by `create_dicom` before we
+                    # could look at it, so it is removed here. Leaving it would put a
+                    # source in the list that no response ever mentioned — one import
+                    # producing two entries, the wrong-looking one being the one
+                    # nobody was told about.
+                    store.delete(record.source_id)
+                    record = store.create_images(
+                        staged, request.workspace_id, request.set_id, fallback
+                    )
+                    kind = "images"
+            else:
+                record = store.create_images(
+                    staged, request.workspace_id, request.set_id, fallback
+                )
+        except Exception as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"that dataset could not be read: {exc}",
+            ) from exc
 
     summary = to_summary(record)
     return {

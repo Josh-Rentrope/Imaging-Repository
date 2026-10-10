@@ -18,12 +18,10 @@ the segmenter, and `materialize()` replaces it.
 
 from __future__ import annotations
 
-import io
 import json
 import tempfile
 import uuid
-import zipfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,9 +36,6 @@ from .storage import Storage
 
 MAX_FILES = 4000
 MAX_TOTAL_BYTES = 3 * 1024**3
-
-#: Names that identify a zip rather than a DICOM part-10 file.
-_ZIP_SUFFIXES = (".zip",)
 
 
 class InstanceRecord(BaseModel):
@@ -114,33 +109,6 @@ def to_summary(record: SourceRecord) -> SourceSummary:
         renderable=record.renderable,
         render_reason=record.render_reason,
     )
-
-
-def expand_uploads(files: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
-    """Flatten any zips. Scanner exports arrive zipped as often as not."""
-    expanded: list[tuple[str, bytes]] = []
-    for name, data in files:
-        if not name.lower().endswith(_ZIP_SUFFIXES):
-            expanded.append((name, data))
-            continue
-        try:
-            with zipfile.ZipFile(io.BytesIO(data)) as archive:
-                for info in archive.infolist():
-                    if info.is_dir():
-                        continue
-                    # Keep the basename: archives often nest a folder, and the
-                    # path adds nothing since sources are already isolated.
-                    base = Path(info.filename).name
-                    # Entry names are attacker-chosen. A name that reduces to a
-                    # bare `.` or `..` is not a file and would become a key the
-                    # store refuses -- refused here too, rather than surfacing as
-                    # a 400 on an otherwise valid upload.
-                    if base in ("", ".", ".."):
-                        continue
-                    expanded.append((base, archive.read(info)))
-        except zipfile.BadZipFile:
-            expanded.append((name, data))
-    return expanded
 
 
 class SourceStore:
@@ -235,21 +203,29 @@ class SourceStore:
     # -- ingestion ----------------------------------------------------------
 
     def create_dicom(
-        self, files: list[tuple[str, bytes]], workspace_id: str, set_id: str, name: str | None
+        self, files: Sequence[Path], workspace_id: str, set_id: str, name: str | None
     ) -> SourceRecord:
+        """One DICOM series from staged files.
+
+        `files` are paths, not payloads. The grouping below needs every file's
+        header before it can choose, and reading them all to get that would put a
+        study's worth of pixels in memory to read a few hundred bytes each.
+        """
         source_id = str(uuid.uuid4())
-        expanded = expand_uploads(files)
 
         # Group by SeriesInstanceUID; anything unparseable shares a bucket.
-        groups: dict[str, list[tuple[str, bytes, Any]]] = {}
-        for file_name, data in expanded:
-            header = parse_file(data)
+        groups: dict[str, list[Path]] = {}
+        header_of: dict[Path, Any] = {}
+        for path in files:
+            header = parse_file(path.read_bytes())
+            header_of[path] = header
             key = (header.series_uid if header and header.series_uid else None) or "__headerless__"
-            groups.setdefault(key, []).append((file_name, data, header))
+            groups.setdefault(key, []).append(path)
 
         # Use the largest group: dragging in a mixed folder should pick the study,
         # not the first stray file that happened to sort first.
-        _, entries = max(groups.items(), key=lambda item: len(item[1]))
+        _, chosen = max(groups.items(), key=lambda item: len(item[1]))
+        entries = [(path, header_of[path]) for path in chosen]
 
         record = SourceRecord(
             source_id=source_id,
@@ -258,16 +234,17 @@ class SourceStore:
             original_name=_describe(entries),
             workspace_id=workspace_id,
             set_id=set_id,
-            modality=next((h.modality for _, _, h in entries if h and h.modality), None),
-            headerless=all(h is None for _, _, h in entries),
+            modality=next((h.modality for _, h in entries if h and h.modality), None),
+            headerless=all(h is None for _, h in entries),
         )
 
-        for file_name, data, header in entries:
-            key = f"sources/{source_id}/files/{file_name}"
+        for path, header in entries:
+            data = path.read_bytes()
+            key = f"sources/{source_id}/files/{path.name}"
             self.storage.put(key, data)
             record.instances.append(
                 InstanceRecord(
-                    file_name=file_name,
+                    file_name=path.name,
                     ref=self.storage.ref(key),
                     bytes=len(data),
                     sop_instance_uid=(header.sop_instance_uid if header else None) or "",
@@ -279,14 +256,21 @@ class SourceStore:
         record.instance_count = len(record.instances)
         record.bytes_total = sum(i.bytes for i in record.instances)
         record.instances.sort(key=lambda i: i.file_name)
-        self._attach_volume(record, [data for _, data, _ in entries])
+        self._attach_volume(record, [path.read_bytes() for path, _ in entries])
         return self.save(record)
 
     def create_images(
-        self, files: list[tuple[str, bytes]], workspace_id: str, set_id: str, name: str | None
+        self, files: Sequence[Path], workspace_id: str, set_id: str, name: str | None
     ) -> SourceRecord:
+        """One image set from staged files.
+
+        The staged names carry the order, and ordering is sorted by name
+        everywhere it is used. A phone capture numbers its frames in capture
+        order, a camera names them in shot order, and a zip keeps the names it
+        was built with -- so all three reconstruct in the order they were taken
+        without anything having to record an order separately.
+        """
         source_id = str(uuid.uuid4())
-        expanded = expand_uploads(files)
 
         fallback = f"Image set {source_id[:8]}"
         record = SourceRecord(
@@ -302,11 +286,15 @@ class SourceStore:
             render_reason="reconstruction not implemented",
         )
 
-        for file_name, data in expanded:
-            key = f"sources/{source_id}/files/{file_name}"
+        for path in files:
+            # One file at a time. This is the loop a phone capture goes through,
+            # and holding the set rather than the file is what made it a memory
+            # problem.
+            data = path.read_bytes()
+            key = f"sources/{source_id}/files/{path.name}"
             self.storage.put(key, data)
             record.instances.append(
-                InstanceRecord(file_name=file_name, ref=self.storage.ref(key), bytes=len(data))
+                InstanceRecord(file_name=path.name, ref=self.storage.ref(key), bytes=len(data))
             )
 
         record.instance_count = len(record.instances)
@@ -352,8 +340,8 @@ class SourceStore:
         )
 
 
-def _describe(entries: list[tuple[str, bytes, Any]]) -> str | None:
-    for _, _, header in entries:
+def _describe(entries: list[tuple[Path, Any]]) -> str | None:
+    for _, header in entries:
         if header and header.series_description:
             return header.series_description
     return None
