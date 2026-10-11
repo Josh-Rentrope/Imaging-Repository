@@ -45,6 +45,7 @@ class Reporter(Protocol):
         done: int | None = None,
         total: int | None = None,
         stage: str | None = None,
+        overall: float | None = None,
     ) -> None: ...
 
 
@@ -66,10 +67,22 @@ class Update:
     done: int | None = None
     total: int | None = None
     status: str = "running"
+    #: Where the whole run is, when the producer can place this step within it.
+    #:
+    #: Set when a run knows its own phases and their relative cost, so the bar
+    #: spans the job rather than resetting at every phase boundary. Absent means
+    #: "the bar is this step's own progress", which is what a single-phase run
+    #: wants anyway.
+    overall: float | None = None
 
     @property
     def determinate(self) -> bool:
         return self.done is not None and bool(self.total)
+
+    def fraction(self) -> float | None:
+        if self.overall is not None:
+            return min(1.0, max(0.0, self.overall))
+        return min(1.0, self.done / self.total) if self.determinate else None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -79,7 +92,7 @@ class Update:
             "stage": self.stage,
             "done": self.done,
             "total": self.total,
-            "fraction": min(1.0, self.done / self.total) if self.determinate else None,
+            "fraction": self.fraction(),
             "status": self.status,
             "at": datetime.now(UTC).isoformat(),
         }
@@ -97,6 +110,28 @@ def job_topic(job_id: str, viewer: str | None) -> str:
 def job_name(job_id: str) -> str:
     """What a client calls a job's topic. Bare, so the namespace stays internal."""
     return job_id
+
+
+#: What a client asks for to reach its own viewer topic.
+#:
+#: A client cannot name its own folder — that is a hash of a cookie it does not
+#: read — so it asks for `me` and the route resolves it. Which is also what stops
+#: it naming anyone else's.
+VIEWER_ALIAS = "me"
+
+#: What a viewer-scoped update is addressed as. A download is not a job and has
+#: no job id to be watched by, so it needs a name both sides can agree on
+#: without one.
+VIEWER_TASK = "download"
+
+
+def viewer_topic(folder: str | None) -> str:
+    """The topic for work that is not a job: a download, an import.
+
+    Scoped by folder on exactly the same rule as a job topic, so one viewer's
+    transfers cannot appear in another's stream.
+    """
+    return f"viewer:{folder or ''}"
 
 
 class _Subscriber:
@@ -208,6 +243,7 @@ class Progress:
             done: int | None = None,
             total: int | None = None,
             stage: str | None = None,
+            overall: float | None = None,
         ) -> None:
             self.publish(
                 Update(
@@ -217,6 +253,7 @@ class Progress:
                     stage=stage,
                     done=done,
                     total=total,
+                    overall=overall,
                 )
             )
 

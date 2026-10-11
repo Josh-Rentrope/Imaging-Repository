@@ -17,12 +17,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+from collections import deque
+from collections.abc import Callable, Iterator
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import IO
 
 import numpy as np
 
@@ -103,6 +109,115 @@ def resolve_binary(configured: str = "") -> list[str]:
         pass
 
     raise SegUnavailable(INSTALL_HINT)
+
+
+#: A tqdm bar, with or without a name in front of it. TotalSegmentator labels
+#: the weights download and leaves the prediction bar bare, so both shapes occur
+#: in one run.
+#:
+#: Read off a real run on this workstation. Matched on content rather than
+#: position because tqdm's own layout has changed across versions.
+_TQDM = re.compile(r"^(?:(?P<label>[^|%]+?):\s+)?(?P<percent>\d+)%\|")
+#: The `done/total` in the middle of a bar. Integers only, which is why the
+#: download bar's `166M/234M` does not match -- that one reports a percentage and
+#: nothing countable.
+_COUNTS = re.compile(r"\|\s*(?P<done>\d+)/(?P<total>\d+)\s*\[")
+
+#: What a bare bar is doing. The tool names the download and nothing else, so
+#: the default is the segmentation itself.
+_PROGRESS_LABELS = {"downloading": "Fetching model weights"}
+
+
+def read_progress(line: str) -> tuple[str, float, int | None, int | None] | None:
+    """A tqdm line as `(label, fraction, done, total)`, or None if it is not one."""
+    match = _TQDM.match(line.strip())
+    if match is None:
+        return None
+
+    counts = _COUNTS.search(line)
+    return (
+        _PROGRESS_LABELS.get((match.group("label") or "").strip().lower(), "Segmenting"),
+        int(match.group("percent")) / 100.0,
+        int(counts.group("done")) if counts else None,
+        int(counts.group("total")) if counts else None,
+    )
+
+
+def _segments(stream: IO[str]) -> Iterator[str]:
+    """Split a stream on carriage returns as well as newlines.
+
+    tqdm redraws its bar with `\\r`, so reading this as lines would hand back one
+    enormous line containing the whole run's progress and nothing at all until it
+    had finished -- which is the same as having no progress.
+    """
+    buffer = ""
+    while True:
+        char = stream.read(1)
+        if not char:
+            break
+        if char in "\r\n":
+            if buffer:
+                yield buffer
+                buffer = ""
+            continue
+        buffer += char
+    if buffer:
+        yield buffer
+
+
+def _run_streaming(
+    command: list[str],
+    on_progress: Callable[[str, float, int | None, int | None], None] | None,
+) -> tuple[int, str]:
+    """Run the tool, reporting its progress, and return `(returncode, tail)`.
+
+    Streamed rather than captured because a segmentation is minutes of work whose
+    only evidence is a bar. `--quiet` used to suppress exactly that, which is why
+    none of this was visible before.
+    """
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+
+    timed_out = threading.Event()
+
+    def stop() -> None:
+        timed_out.set()
+        process.kill()
+
+    killer = threading.Timer(TIMEOUT_SECONDS, stop)
+    killer.daemon = True
+    killer.start()
+
+    tail: deque[str] = deque(maxlen=40)
+    try:
+        assert process.stdout is not None
+        for line in _segments(process.stdout):
+            tail.append(line)
+            if on_progress is None:
+                continue
+            found = read_progress(line)
+            if found is not None:
+                # A progress callback must not be able to kill the run it is
+                # reporting on.
+                with suppress(Exception):
+                    on_progress(*found)
+        process.wait()
+    finally:
+        killer.cancel()
+
+    if timed_out.is_set():
+        process.kill()
+        raise SegFailed(
+            f"TotalSegmentator timed out after {TIMEOUT_SECONDS // 60} minutes"
+        )
+    return process.returncode, "\n".join(tail)[-600:].strip()
 
 
 def info_binary(segmenter: str = "") -> list[str] | None:
@@ -203,6 +318,7 @@ def run(
     classes: list[str] | None = None,
     fast: bool = True,
     task: str = "total",
+    on_progress: Callable[[str, float, int | None, int | None], None] | None = None,
 ) -> Segmentation:
     """Segment a directory of DICOM slices and return the multi-label mask."""
     argv = resolve_binary(os.environ.get("BONE_VIEWER_TOTALSEGMENTATOR", ""))
@@ -232,7 +348,6 @@ def run(
             task,
             # One combined multi-label file instead of one file per class.
             "-ml",
-            "--quiet",
         ]
         if fast:
             command.append("-f")
@@ -243,19 +358,12 @@ def run(
         command.append("-s")
 
         try:
-            completed = subprocess.run(
-                command, capture_output=True, text=True, timeout=TIMEOUT_SECONDS
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise SegFailed(
-                f"TotalSegmentator timed out after {TIMEOUT_SECONDS // 60} minutes"
-            ) from exc
+            returncode, tail = _run_streaming(command, on_progress)
         except OSError as exc:
             raise SegUnavailable(f"could not run TotalSegmentator: {exc}. {INSTALL_HINT}") from exc
 
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "").strip()[-600:]
-            raise SegFailed(f"TotalSegmentator exited {completed.returncode}: {detail}")
+        if returncode != 0:
+            raise SegFailed(f"TotalSegmentator exited {returncode}: {tail}")
 
         mask_path = _find_multilabel(out_dir, output_file)
         if mask_path is None:

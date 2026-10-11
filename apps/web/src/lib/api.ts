@@ -85,6 +85,67 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T
 }
 
+/**
+ * An upload, with progress.
+ *
+ * `XMLHttpRequest` rather than `fetch`, and the only place in this client that
+ * uses it: fetch says nothing about a request while it is being sent, and an
+ * upload of a few hundred photographs is exactly where "working" and "hung" look
+ * the same. Same credentials and the same error shape as `request`, so a caller
+ * cannot tell which one it went through apart from the progress.
+ */
+function upload<T>(
+  path: string,
+  form: FormData,
+  onProgress?: (fraction: number) => void,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest()
+    request.open('POST', `${API_BASE}${path}`)
+    request.withCredentials = CREDENTIALS === 'include'
+
+    request.upload.onprogress = (event) => {
+      // Not computable when the browser cannot size the body, which happens
+      // with a chunked upload. Reporting a fraction then would be a guess.
+      if (onProgress && event.lengthComputable && event.total > 0) {
+        onProgress(event.loaded / event.total)
+      }
+    }
+
+    request.onload = () => {
+      if (request.status >= 200 && request.status < 300) {
+        try {
+          resolve(JSON.parse(request.responseText) as T)
+        } catch {
+          reject(new ApiError('the server sent something that is not JSON', request.status))
+        }
+        return
+      }
+      let detail: unknown
+      try {
+        detail = JSON.parse(request.responseText)
+      } catch {
+        detail = request.responseText
+      }
+      const message =
+        typeof detail === 'object' && detail !== null && 'detail' in detail
+          ? String((detail as { detail: unknown }).detail)
+          : `${request.status} ${request.statusText}`
+      reject(new ApiError(message, request.status, detail))
+    }
+
+    request.onerror = () =>
+      reject(
+        new ApiError(
+          `Cannot reach the API at ${API_BASE}. Start it with: cd apps/api && uv run uvicorn app.main:app --reload --port 8787`,
+          0,
+        ),
+      )
+    request.onabort = () => reject(new ApiError('the upload was cancelled', 0))
+    request.send(form)
+  })
+}
+
 /** Turn an opaque storage ref into something fetchable. */
 export function artifactUrl(ref: string): string {
   const key = ref.includes('://') ? ref.split('://', 2)[1] : ref
@@ -206,17 +267,15 @@ export const api = {
       `/sources?workspace_id=${encodeURIComponent(workspaceId)}&set_id=${encodeURIComponent(setId)}`,
     ),
 
-  uploadDicom: (files: File[], workspaceId: string, setId: string) =>
-    request<SourceSummary>('/sources/dicom', {
-      method: 'POST',
-      body: uploadForm(files, workspaceId, setId),
-    }),
+  uploadDicom: (files: File[], workspaceId: string, setId: string, onProgress?: (f: number) => void) =>
+    upload<SourceSummary>('/sources/dicom', uploadForm(files, workspaceId, setId), onProgress),
 
-  uploadImages: (files: File[], workspaceId: string, setId: string) =>
-    request<SourceSummary>('/sources/images', {
-      method: 'POST',
-      body: uploadForm(files, workspaceId, setId),
-    }),
+  uploadImages: (
+    files: File[],
+    workspaceId: string,
+    setId: string,
+    onProgress?: (f: number) => void,
+  ) => upload<SourceSummary>('/sources/images', uploadForm(files, workspaceId, setId), onProgress),
 
   renameSource: (id: string, name: string) => {
     const form = new FormData()

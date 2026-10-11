@@ -20,19 +20,14 @@ import asyncio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..config import get_settings
-from ..progress import job_topic
+from ..progress import VIEWER_ALIAS, job_topic, viewer_topic
 from ..tenancy import resolve
 
 router = APIRouter(tags=["events"])
 
-#: The kinds of thing a client may subscribe to. `job` is the only one so far; a
-#: workspace or working-set topic slots in here without touching the socket or
-#: the message shape.
-_KINDS = frozenset({"job"})
-
-#: Sent when a viewer asks for something that is not a topic we serve, so the
-#: form of a request is answerable rather than silently ignored.
-NOTHING = 1000
+#: The kinds of thing a client may subscribe to. A workspace or working-set
+#: topic slots in here without touching the socket or the message shape.
+_KINDS = frozenset({"job", "viewer"})
 
 
 def _internal(requested: str, viewer: str | None) -> str | None:
@@ -43,9 +38,13 @@ def _internal(requested: str, viewer: str | None) -> str | None:
     answered with a bare id; the namespace is the server's business.
     """
     kind, _, ident = requested.partition(":")
-    if kind not in _KINDS or not ident:
+    if not ident:
         return None
-    return job_topic(ident, viewer)
+    if kind == "job":
+        return job_topic(ident, viewer)
+    if kind == "viewer" and ident == VIEWER_ALIAS:
+        return viewer_topic(viewer)
+    return None
 
 
 @router.websocket("/ws")

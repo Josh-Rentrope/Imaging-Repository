@@ -91,6 +91,53 @@ def test_a_reporter_cannot_reach_a_different_viewer(loop):
     assert drain(loop, ours) == []
 
 
+def test_a_viewer_scoped_update_reaches_a_client_that_asked_for_viewer_me(client):
+    """The alias and the topic are computed in two different places — the socket
+    route resolves one and the importing route publishes the other — so they have
+    to agree, and nothing else would notice if they stopped.
+
+    A download is not a job, so there is no id for the client to name. It asks
+    for `viewer:me` because its own folder is a hash of a cookie it cannot read.
+    """
+    from app.progress import VIEWER_TASK, Update, viewer_topic
+
+    with client.websocket_connect("/ws?topics=viewer:me") as socket:
+        assert socket.receive_json()["topics"] == ["viewer:me"]
+
+        # The same call the importing route makes, with tenancy off.
+        client.app.state.progress.publish(
+            Update(
+                topic=viewer_topic(None),
+                task_id=VIEWER_TASK,
+                label="Downloading Pancreas-CT",
+                done=1,
+                total=4,
+            )
+        )
+
+        message = socket.receive_json()
+        assert message["task_id"] == "download"
+        assert message["fraction"] == 0.25
+
+
+def test_an_overall_position_beats_the_step_s_own_counts():
+    """A run that knows its phases reports where the job is; a run that does not
+    reports where the step is. The first wins, or a three-phase job would still
+    read as three completions."""
+    from app.progress import Update
+
+    placed = Update(topic="t", task_id="j", done=10, total=10, overall=0.5)
+
+    assert placed.fraction() == 0.5
+
+
+def test_without_an_overall_position_the_step_speaks_for_itself():
+    from app.progress import Update
+
+    assert Update(topic="t", task_id="j", done=2, total=8).fraction() == 0.25
+    assert Update(topic="t", task_id="j").fraction() is None
+
+
 def test_publishing_from_another_thread_reaches_the_loop(loop):
     """The whole reason for the registry: jobs run on threads and clients are on
     the event loop, and the loop is where the socket can be written to."""

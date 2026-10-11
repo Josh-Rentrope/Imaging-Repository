@@ -12,6 +12,7 @@ from fastapi import Request
 from .config import Settings, get_settings
 from .jobs import JobStore
 from .pipeline import BackendRegistry
+from .progress import Progress
 from .sources import SourceStore
 from .storage import Storage
 
@@ -41,9 +42,21 @@ def get_config(request: Request) -> Settings:
     return request.app.state.settings
 
 
+def get_progress(request: Request) -> Progress:
+    """The live progress registry, for work that is not a job.
+
+    A job's reporter arrives through a context variable set by the worker. A
+    request that does its own slow thing on the way to answering -- a dataset
+    download -- has no worker to have set it, so it asks for the registry and
+    addresses its own topic.
+    """
+    return request.app.state.progress
+
+
 __all__ = [
     "get_config",
     "get_job_store",
+    "get_progress",
     "get_registry",
     "get_settings",
     "get_source_store",

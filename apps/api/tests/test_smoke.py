@@ -1431,7 +1431,7 @@ def test_a_rar_says_what_is_missing_rather_than_failing_obscurely():
     blob = b"Rar!\x1a\x07\x00" + b"\0" * 64
     monkey = __import__("app.fetch", fromlist=["download"])
     original = monkey.download
-    monkey.download = lambda url: blob
+    monkey.download = lambda url, **_: blob
     try:
         with pytest.raises(RemoteError, match="unrar"):
             fetch_dataset("http://example.com/x.rar")
@@ -1508,7 +1508,7 @@ def test_importing_from_a_url_adds_a_normal_source(client, monkeypatch):
         archive.writestr("photo-1.jpg", b"\xff\xd8\xff\xe0" + b"a" * 32)
         archive.writestr("nested/photo-2.jpg", b"\xff\xd8\xff\xe0" + b"b" * 32)
 
-    monkeypatch.setattr(fetch, "download", lambda url: buffer.getvalue())
+    monkeypatch.setattr(fetch, "download", lambda url, **_:  buffer.getvalue())
 
     response = client.post(
         "/sources/remote",
@@ -1534,7 +1534,7 @@ def test_importing_from_a_url_adds_a_normal_source(client, monkeypatch):
 def test_a_refused_url_is_a_client_error_with_a_reason(client, monkeypatch):
     from app import fetch
 
-    def refuse(url):
+    def refuse(url, **_: object):
         raise fetch.RemoteError("that address is not public")
 
     monkeypatch.setattr(fetch, "download", refuse)
@@ -1563,7 +1563,7 @@ def test_the_remote_import_can_be_turned_off(tmp_path, monkeypatch):
 
     from app import fetch
 
-    def never(url):
+    def never(url, **_: object):
         raise AssertionError("the gate let a fetch through")
 
     monkeypatch.setattr(fetch, "download", never)
@@ -1632,7 +1632,7 @@ def test_an_unrecognisable_archive_says_so(client, monkeypatch):
     assert "none of the first 1 files is DICOM" in found.reason
 
     # And the same verdict travels back through the endpoint.
-    monkeypatch.setattr(fetch, "download", lambda url: b"just some text")
+    monkeypatch.setattr(fetch, "download", lambda url, **_:  b"just some text")
     response = client.post(
         "/sources/remote",
         json={"url": "https://example.com/mystery.zip", "workspace_id": "w", "set_id": "s"},
@@ -1652,7 +1652,7 @@ def test_an_explicit_kind_beats_detection_and_is_recorded_as_such(client, monkey
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("scan.dcm", payload)
-    monkeypatch.setattr(fetch, "download", lambda url: buffer.getvalue())
+    monkeypatch.setattr(fetch, "download", lambda url, **_:  buffer.getvalue())
 
     response = client.post(
         "/sources/remote",
@@ -1695,7 +1695,7 @@ def test_dicom_that_will_not_assemble_stays_dicom(client, monkeypatch):
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("pa.dcm", payload)
-    monkeypatch.setattr(fetch, "download", lambda url: buffer.getvalue())
+    monkeypatch.setattr(fetch, "download", lambda url, **_:  buffer.getvalue())
 
     response = client.post(
         "/sources/remote",
@@ -1723,7 +1723,7 @@ def test_headers_that_are_not_dicom_at_all_fall_through_to_images(client, monkey
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("photo.jpg", b"\xff\xd8\xff\xe0" + b"x" * 64)
-    monkeypatch.setattr(fetch, "download", lambda url: buffer.getvalue())
+    monkeypatch.setattr(fetch, "download", lambda url, **_:  buffer.getvalue())
 
     response = client.post(
         "/sources/remote",
@@ -1818,7 +1818,7 @@ def test_an_import_that_falls_back_leaves_no_orphan_source(client, monkeypatch):
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("photo.jpg", b"\xff\xd8\xff\xe0" + b"x" * 64)
-    monkeypatch.setattr(fetch, "download", lambda url: buffer.getvalue())
+    monkeypatch.setattr(fetch, "download", lambda url, **_:  buffer.getvalue())
 
     response = client.post(
         "/sources/remote",

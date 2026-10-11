@@ -36,6 +36,7 @@ import tarfile
 import urllib.error
 import urllib.request
 import zipfile
+from collections.abc import Callable
 from urllib.parse import urlparse, urlunparse
 
 #: Files a single remote source may contain, matching the upload limit.
@@ -110,8 +111,16 @@ class _GuardedRedirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def download(url: str) -> bytes:
-    """Fetch a URL, refusing anything that is not a public address."""
+def download(
+    url: str,
+    on_progress: Callable[[int, int | None], None] | None = None,
+) -> bytes:
+    """Fetch a URL, refusing anything that is not a public address.
+
+    `on_progress` is called with bytes so far and the declared total, which is
+    `None` when the server did not say. A dataset worth downloading takes long
+    enough that the difference between working and hung matters.
+    """
     _assert_public(url)
 
     request = urllib.request.Request(
@@ -128,9 +137,10 @@ def download(url: str) -> bytes:
     try:
         with opener.open(request, timeout=120) as response:
             declared = response.headers.get("Content-Length")
-            if declared and int(declared) > MAX_DOWNLOAD_BYTES:
+            announced = int(declared) if declared and declared.isdigit() else None
+            if announced and announced > MAX_DOWNLOAD_BYTES:
                 raise RemoteError(
-                    f"that file is {int(declared) / 1024**3:.1f} GiB; the limit is "
+                    f"that file is {announced / 1024**3:.1f} GiB; the limit is "
                     f"{MAX_DOWNLOAD_BYTES // 1024**3} GiB"
                 )
 
@@ -148,6 +158,8 @@ def download(url: str) -> bytes:
                         f"that file is larger than the {MAX_DOWNLOAD_BYTES // 1024**3} GiB limit"
                     )
                 chunks.append(chunk)
+                if on_progress is not None:
+                    on_progress(total, announced)
     except RemoteError:
         raise
     except urllib.error.HTTPError as exc:
@@ -279,13 +291,19 @@ def _extract_tar(blob: bytes) -> list[tuple[str, bytes]]:
     return files
 
 
-def fetch_dataset(url: str) -> list[tuple[str, bytes]]:
+def fetch_dataset(
+    url: str,
+    on_progress: Callable[[int, int | None], None] | None = None,
+) -> list[tuple[str, bytes]]:
     """Download `url` and return its contents as uploadable files.
 
     An archive is unpacked; anything else is returned as a single unnamed file,
     so a direct link to one DICOM or one photograph works too.
+
+    Only the download reports: unpacking is local, fast by comparison, and its
+    size is not known until the archive is read.
     """
-    blob = download(url)
+    blob = download(url, on_progress=on_progress)
     kind = _looks_like_archive(blob)
 
     if kind == "zip":

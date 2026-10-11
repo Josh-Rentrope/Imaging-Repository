@@ -191,6 +191,9 @@ export default function EditorRoute() {
   // one job. The backend answers as soon as it has accepted the job.
   const [submitting, setSubmitting] = useState(false)
   const [uploading, setUploading] = useState(false)
+  // Null until the browser says how big the body is, which is also when the bar
+  // becomes a bar rather than a sweep.
+  const [uploadFraction, setUploadFraction] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   // Polling outlives a render but must not outlive the screen. Set on mount as
@@ -391,18 +394,20 @@ export default function EditorRoute() {
 
   async function handleFiles(files: File[], kind: 'dicom' | 'images') {
     setUploading(true)
+    setUploadFraction(null)
     setError(null)
     try {
       const created =
         kind === 'dicom'
-          ? await api.uploadDicom(files, activeWorkspace.id, activeSet.id)
-          : await api.uploadImages(files, activeWorkspace.id, activeSet.id)
+          ? await api.uploadDicom(files, activeWorkspace.id, activeSet.id, setUploadFraction)
+          : await api.uploadImages(files, activeWorkspace.id, activeSet.id, setUploadFraction)
       await refreshSources()
       selectSource(created.source_id)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       setUploading(false)
+      setUploadFraction(null)
     }
   }
 
@@ -635,7 +640,11 @@ export default function EditorRoute() {
       />
 
       <aside className="sidebar">
-        <SourceSection onFiles={handleFiles} uploading={uploading} />
+        <SourceSection
+          onFiles={handleFiles}
+          uploading={uploading}
+          uploadFraction={uploadFraction}
+        />
 
         {activeSource?.kind === 'images' && (
           <div className="section">

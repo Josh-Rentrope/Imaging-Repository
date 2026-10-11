@@ -11,11 +11,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from ..config import Settings
-from ..deps import get_config, get_source_store
+from ..deps import get_config, get_progress, get_source_store
 from ..fetch import RemoteError, fetch_dataset, origin_of
 from ..ingest import stage_payloads
+from ..progress import VIEWER_TASK, Progress, viewer_topic
 from ..samples import catalogue
 from ..sources import SourceStore, to_summary
+from ..tenancy import current_folder
 
 router = APIRouter(tags=["samples"])
 
@@ -74,6 +76,7 @@ def import_remote(
     request: RemoteRequest,
     store: Annotated[SourceStore, Depends(get_source_store)],
     settings: Annotated[Settings, Depends(get_config)],
+    progress: Annotated[Progress, Depends(get_progress)],
 ) -> dict:
     """Download a URL and add what it contains as a normal source.
 
@@ -98,9 +101,25 @@ def import_remote(
             ),
         )
 
+    # Published on the viewer's own topic rather than a job's: this is a request
+    # doing its own slow work, not a job, and it has no id for anyone to watch.
+    # The client subscribes before it posts and sees the bar while the request is
+    # still open, which is what keeps this endpoint from having to become a task
+    # that returns an id and runs in the background.
+    label = request.name or origin_of(request.url).rsplit("/", 1)[-1] or "remote dataset"
+    topic = viewer_topic(current_folder.get())
+    reporter = progress.reporter(topic, VIEWER_TASK)
+    reporter(f"Downloading {label}", stage="download")
+
+    def announce(done: int, total: int | None) -> None:
+        reporter(f"Downloading {label}", stage="download", done=done, total=total)
+
     try:
-        files = fetch_dataset(request.url)
+        files = fetch_dataset(request.url, on_progress=announce)
     except RemoteError as exc:
+        # Cleared as well as failed: a bar left standing at 40% after the request
+        # has been answered is a download that looks like it is still running.
+        progress.forget(topic)
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     detection = detect(files)
@@ -143,6 +162,11 @@ def import_remote(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"that dataset could not be read: {exc}",
             ) from exc
+
+    # Done with it. The client clears its own bar when the request answers, but a
+    # value left on the server would be handed to the next client that subscribes
+    # as though a download were still running.
+    progress.forget(topic)
 
     summary = to_summary(record)
     return {

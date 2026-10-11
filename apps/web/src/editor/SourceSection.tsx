@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 
+import { ProgressBar } from '../components/ProgressBar'
 import type { SourceSummary } from '../lib/types'
 import { useEditor } from '../state/editor'
 import { DropZone } from './DropZone'
@@ -91,9 +92,12 @@ function SourceRow({ source, selected }: { source: SourceSummary; selected: bool
 export function SourceSection({
   onFiles,
   uploading,
+  uploadFraction,
 }: {
   onFiles: (files: File[], kind: 'dicom' | 'images') => void
   uploading: boolean
+  /** Null while the browser has not said how large the body is. */
+  uploadFraction: number | null
 }) {
   const { sources, sourcesLoading, sourcesError, activeSourceId } = useEditor()
 
@@ -101,11 +105,29 @@ export function SourceSection({
     <Section id="sources" title="Sources" count={sources.length > 0 ? sources.length : undefined}>
       <DropZone onFiles={onFiles} disabled={uploading} />
 
-      {uploading && <p className="muted" style={{ margin: '8px 0 0' }}>Uploading…</p>}
+      {uploading && (
+        <div style={{ margin: '8px 0 0' }}>
+          {/* The send itself, which is the part that can take minutes on a
+              folder of photographs and used to say only "Uploading…". */}
+          <ProgressBar
+            label="Uploading"
+            fraction={uploadFraction}
+            detail={
+              uploadFraction === null ? undefined : `${Math.round(uploadFraction * 100)}%`
+            }
+          />
+        </div>
+      )}
       {sourcesError && <p className="error-text" style={{ margin: '8px 0 0' }}>{sourcesError}</p>}
 
       {sourcesLoading ? (
-        <p className="muted" style={{ margin: '8px 0 0' }}>Loading…</p>
+        // A sweeping bar rather than the word "Loading…". Switching working set
+        // is the one action here that replaces everything below it, and during
+        // it the panel has to look like it is doing something rather than
+        // looking empty.
+        <div style={{ margin: '8px 0 0' }}>
+          <ProgressBar label="Loading this working set" fraction={null} />
+        </div>
       ) : sources.length > 0 ? (
         <ul className="source-list" style={{ marginTop: 8 }}>
           {sources.map((source) => (

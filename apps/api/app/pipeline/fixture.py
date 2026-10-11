@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ..progress import current_reporter
 from ..sources import SourceStore
 from ..storage import Storage
 from . import solvers, totalseg
@@ -311,6 +312,15 @@ def _segment_volume(envelope: dict, params: dict, context: dict, sources, record
     storage: Storage = context["storage"]
     classes = params.get("classes") or None
 
+    # Read off the ambient context rather than the request: a job runs on its own
+    # thread and the worker is what set it. Absent when nothing is watching,
+    # which is the normal case for the tests.
+    reporter = current_reporter.get()
+
+    def announce(label: str, fraction: float, done: int | None, total: int | None) -> None:
+        if reporter is not None:
+            reporter(label, done=done, total=total, stage="segment", overall=fraction)
+
     # TotalSegmentator is an external command that reads a directory, so the
     # source has to exist as real files for the duration of the run. On a local
     # store that is the store itself; on a bucket it is a staging directory that
@@ -322,6 +332,7 @@ def _segment_volume(envelope: dict, params: dict, context: dict, sources, record
             classes=classes,
             fast=bool(params.get("fast", True)),
             task=str(params.get("task", "total")),
+            on_progress=announce,
         )
     blob, header = totalseg.serialise(seg)
 

@@ -59,16 +59,25 @@ const listeners = new Set<(progress: Progress) => void>()
  * Vite proxy rewrites `/api` away) and absolute in a deployment, so a relative
  * one is resolved against the page.
  */
-export function streamUrl(jobIds: string[]): string {
+export function streamUrl(topics: string[]): string {
   const base = API_BASE.startsWith('http') ? API_BASE : `${window.location.origin}${API_BASE}`
   const url = new URL(`${base}/ws`)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   // Named, not bare. The server's vocabulary is `kind:ident` and a name it does
   // not recognise is dropped — which is a silent failure, so the shape has to be
   // the one it expects rather than the one this side finds convenient.
-  url.searchParams.set('topics', jobIds.map((id) => `job:${id}`).join(','))
+  url.searchParams.set('topics', topics.join(','))
   return url.toString()
 }
+
+/**
+ * What a client calls the viewer's own topic.
+ *
+ * It cannot name its folder — that is a hash of a cookie it does not read — so
+ * it asks for `me` and the server resolves it. Which is also what stops it
+ * naming anyone else's.
+ */
+export const VIEWER_TOPIC = 'viewer:me'
 
 function send(progress: Progress): void {
   for (const listener of listeners) listener(progress)
@@ -186,15 +195,14 @@ function restart(): void {
   open()
 }
 
-/** Follow a job. Returns the function that stops following it. */
-export function watch(jobId: string): () => void {
-  watched.add(jobId)
+/** Follow a topic. Returns the function that stops following it. */
+export function watchTopic(topic: string): () => void {
+  watched.add(topic)
   if (socket) restart()
   else open()
 
   return () => {
-    watched.delete(jobId)
-    awaitingSettle.delete(jobId)
+    watched.delete(topic)
     if (watched.size === 0) {
       const previous = socket
       socket = null
@@ -206,6 +214,17 @@ export function watch(jobId: string): () => void {
     } else {
       restart()
     }
+  }
+}
+
+/** Follow a job. Returns the function that stops following it. */
+export function watch(jobId: string): () => void {
+  const stop = watchTopic(`job:${jobId}`)
+  return () => {
+    // Its resolver goes with it, or a page that navigates away mid-run leaves a
+    // promise nobody will ever settle.
+    awaitingSettle.delete(jobId)
+    stop()
   }
 }
 
