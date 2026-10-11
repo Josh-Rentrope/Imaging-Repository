@@ -69,7 +69,51 @@ def test_progress_is_only_reported_when_someone_asked(monkeypatch):
     returncode, _ = totalseg._run_streaming(["anything"], collect)
 
     assert returncode == 0
-    assert [entry[0] for entry in seen] == ["Segmenting", "Fetching model weights"]
+    assert [entry[0] for entry in seen][:2] == ["Segmenting", "Fetching model weights"]
+    # The end is announced, so the last phase does not stop short of it.
+    assert seen[-1][1] == 1.0
+
+
+# ── two bars, one progress ──────────────────────────────────────────────────
+
+#: What a real fast run actually prints: inference over four patches, then a
+#: pass over the 117 classes. Copied from a run on this workstation.
+REAL_FAST_RUN = ["  0%|          | 0/4 [00:00<?, ?it/s]",
+                 "100%|##########| 4/4 [00:15<00:00, 3.91s/it]",
+                 "  0%|          | 0/117 [00:00<?, ?it/s]",
+                 "100%|##########| 117/117 [00:01<00:00, 74.82it/s]"]
+
+
+def test_a_second_bar_takes_the_next_share_rather_than_starting_over():
+    """The tool's bars are unlabelled and sequential, so read on their own the
+    bar fills, resets, and fills again — two completions of one segmentation."""
+    phases = totalseg._Phases()
+    walked = [phases.place(total, percent / 100) for total, percent in _BY_TOTAL]
+
+    assert walked == sorted(walked)
+    # Half the bar for inference, then half of what is left.
+    assert [round(value, 3) for value in walked] == [0.0, 0.5, 0.5, 0.75]
+
+
+def test_a_bar_that_keeps_its_length_is_the_same_phase():
+    phases = totalseg._Phases()
+
+    assert phases.place(4, 0.25) == pytest.approx(0.125)
+    assert phases.place(4, 0.5) == pytest.approx(0.25)
+    assert phases.place(4, 1.0) == pytest.approx(0.5)
+
+
+def test_each_new_phase_takes_half_of_what_is_left():
+    """So it never has to know how many phases there will be."""
+    phases = totalseg._Phases()
+
+    assert phases.place(1, 0.0) == pytest.approx(0.0)
+    assert phases.place(2, 0.0) == pytest.approx(0.5)
+    assert phases.place(3, 0.0) == pytest.approx(0.75)
+
+
+#: `(bar length, percent)` in the order a real run prints them.
+_BY_TOTAL = [(4, 0), (4, 100), (117, 0), (117, 100)]
 
 
 def test_a_run_with_nobody_listening_still_returns_its_tail():

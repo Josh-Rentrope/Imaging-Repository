@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 
+import { Spinner } from '../components/Spinner'
 import type { ResultEnvelope, SourceSummary, VolumePayload } from '../lib/types'
 import type { ResultView } from './ResultsSection'
 import type { SceneModel, SceneSelection, SceneSurface } from './Scene'
@@ -114,14 +115,22 @@ export function Viewport3D({
   volume,
   results,
   busy,
+  uploading = false,
 }: {
   source: SourceSummary | null
   volume: VolumePayload | null
   results: ResultView[]
   busy: boolean
+  /** Whether a new source is being sent. Its own flag and not `busy`: a job
+   *  running has layers reporting how far along it is, while an upload has
+   *  nothing on screen yet and the viewport still shows the last dataset. */
+  uploading?: boolean
 }) {
   const [settings, setSettings] = useState<ViewportSettings>(DEFAULT_SETTINGS)
   const [selection, setSelection] = useState<SceneSelection | null>(null)
+  // Bumped to fit the view again. A counter rather than a callback, so the
+  // render window stays owned by the scene that draws into it.
+  const [resetToken, setResetToken] = useState(0)
   const viewportRef = useRef<HTMLDivElement>(null)
   const viewportSize = useElementSize(viewportRef)
 
@@ -201,6 +210,7 @@ export function Viewport3D({
             settings={settings}
             selection={selection}
             onSelect={setSelection}
+            resetToken={resetToken}
           />
         </Suspense>
       ) : (
@@ -208,6 +218,26 @@ export function Viewport3D({
       )}
 
       {selection && <PickPopup selection={selection} viewport={viewportSize} />}
+
+      {hasContent && !uploading && (
+        <button
+          className="viewport-reset"
+          title="Fit the view to the data"
+          aria-label="Fit the view to the data"
+          onClick={() => setResetToken((token) => token + 1)}
+        >
+          ⟳
+        </button>
+      )}
+
+      {uploading && (
+        // Over whatever is already drawn. Without it the previous dataset stays
+        // on screen looking like the one that was just sent, for as long as the
+        // upload takes — which on a folder of photographs is minutes.
+        <div className="viewport-veil">
+          <Spinner className="is-over-scene" label="Uploading" />
+        </div>
+      )}
 
       {latest && (
         <div className="viewport-footer">

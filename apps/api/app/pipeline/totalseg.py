@@ -143,6 +143,37 @@ def read_progress(line: str) -> tuple[str, float, int | None, int | None] | None
     )
 
 
+class _Phases:
+    """Shares one bar across however many phases the tool turns out to have.
+
+    TotalSegmentator's bars are unlabelled and their number is not known until the
+    run is over: a weights download on the first run, then inference, then a
+    per-class pass. So each new bar takes half of what is left — the first half
+    the bar, the next a quarter, and so on. It never has to know how many there
+    will be, and it never moves backwards.
+
+    The cost is that the last phase never quite reaches the end, which is why a
+    finished run snaps to 1.0 rather than being left at seven eighths.
+    """
+
+    def __init__(self) -> None:
+        self._current: int | None = None
+        #: Where the bar has been allocated up to, not where it ends. Starting
+        #: this at 1.0 hands the first phase the whole bar and leaves nothing
+        #: for the rest.
+        self._start = 0.0
+        self._end = 0.0
+
+    def place(self, total: int | None, fraction: float) -> float:
+        if total != self._current:
+            # A different length is a different bar. The tool redraws with a new
+            # total when it moves on to the next thing.
+            self._current = total
+            self._start = self._end
+            self._end = self._start + (1.0 - self._start) / 2
+        return self._start + (self._end - self._start) * fraction
+
+
 def _segments(stream: IO[str]) -> Iterator[str]:
     """Split a stream on carriage returns as well as newlines.
 
@@ -195,6 +226,7 @@ def _run_streaming(
     killer.daemon = True
     killer.start()
 
+    phases = _Phases()
     tail: deque[str] = deque(maxlen=40)
     try:
         assert process.stdout is not None
@@ -204,10 +236,11 @@ def _run_streaming(
                 continue
             found = read_progress(line)
             if found is not None:
+                label, fraction, done, total = found
                 # A progress callback must not be able to kill the run it is
                 # reporting on.
                 with suppress(Exception):
-                    on_progress(*found)
+                    on_progress(label, phases.place(total, fraction), done, total)
         process.wait()
     finally:
         killer.cancel()
@@ -217,6 +250,13 @@ def _run_streaming(
         raise SegFailed(
             f"TotalSegmentator timed out after {TIMEOUT_SECONDS // 60} minutes"
         )
+
+    if process.returncode == 0 and on_progress is not None:
+        # The geometric shares leave the final phase short of the end, so a run
+        # that finished says so rather than stopping at seven eighths.
+        with suppress(Exception):
+            on_progress("Segmenting", 1.0, None, None)
+
     return process.returncode, "\n".join(tail)[-600:].strip()
 
 

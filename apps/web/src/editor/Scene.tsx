@@ -22,6 +22,7 @@ import vtkPLYReader from '@kitware/vtk.js/IO/Geometry/PLYReader'
 import vtkSTLReader from '@kitware/vtk.js/IO/Geometry/STLReader'
 import vtkGenericRenderWindow from '@kitware/vtk.js/Rendering/Misc/GenericRenderWindow'
 
+import { Spinner } from '../components/Spinner'
 import { artifactUrl, fetchArtifact } from '../lib/api'
 import type { VolumeHeader } from '../lib/types'
 import { intersectBox, intersectMesh, type Ray, type Visibility } from './raycast'
@@ -513,6 +514,20 @@ function selectAt(
   })
 }
 
+/**
+ * Put the camera back on the data.
+ *
+ * Given the bounds explicitly rather than letting `resetCamera()` compute them
+ * from the visible props. A result can be far larger than the scan it came from
+ * — a dense cloud, a mask that was placed badly — and framing everything fits
+ * the outlier. The dataset is what the view is reset *to*, so it is what gets
+ * passed.
+ */
+function fit(ctx: Ctx) {
+  ctx.renderer.resetCamera(ctx.bounds)
+  ctx.renderWindow.render()
+}
+
 function applyClipFlags(ctx: Ctx, model: SceneModel) {
   const planes = AXES.map((axis) => ctx.planes[axis])
 
@@ -599,11 +614,15 @@ export function Scene({
   settings,
   selection,
   onSelect,
+  resetToken = 0,
 }: {
   model: SceneModel
   settings: ViewportSettings
   selection: SceneSelection | null
   onSelect: (selection: SceneSelection | null) => void
+  /** Incremented to fit the view again. A number rather than a callback, so the
+   *  render window stays owned by this component. */
+  resetToken?: number
 }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const ctxRef = useRef<Ctx | null>(null)
@@ -705,7 +724,14 @@ export function Scene({
       ctx.volume = null
       ctx.volumeMapper = null
     }
-    if (!model.volume) return
+    if (!model.volume) {
+      // Moving to a dataset with no volume. The frame has to be given up here,
+      // or the surfaces that arrive next are drawn into the *previous* study's
+      // bounds and the view never fits them — the surface path only sets bounds
+      // while nothing has been framed yet.
+      ctx.framed = false
+      return
+    }
 
     let cancelled = false
     setStatus('Loading volume…')
@@ -870,15 +896,21 @@ export function Scene({
     }
   }, [surfaceKey])
 
-  // ── frame on first content ───────────────────────────────────────────────
+  // ── framing ──────────────────────────────────────────────────────────────
   useEffect(() => {
     const ctx = ctxRef.current
     if (!ctx || ctx.framed) return
     if (!ctx.volume && ctx.surfaces.size === 0) return
-    ctx.renderer.resetCamera()
-    ctx.renderWindow.render()
+    fit(ctx)
     ctx.framed = true
   }, [revision])
+
+  // ── fit on request ───────────────────────────────────────────────────────
+  useEffect(() => {
+    const ctx = ctxRef.current
+    if (!ctx || !ctx.framed) return
+    fit(ctx)
+  }, [resetToken])
 
   // ── visibility ───────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1042,7 +1074,14 @@ export function Scene({
     <div style={{ position: 'absolute', inset: 0 }}>
       <div className="scene-host" ref={containerRef} />
       {error && <div className="empty-state error-text">{error}</div>}
-      {!error && status && <div className="empty-state">{status}</div>}
+      {!error && status && (
+        // A spinner rather than the words alone. There is no total to count
+        // against while a volume is read and uploaded to the GPU, so a bar here
+        // would be a percentage nobody measured.
+        <div className="empty-state">
+          <Spinner label={status} />
+        </div>
+      )}
     </div>
   )
 }

@@ -364,6 +364,75 @@ button, select, input {
   100% { margin-left: 100%; }
 }
 
+/* Spinner. Used where a bar would have to invent a total. */
+.spinner {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.spinner__ring {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  animation: spinner-turn 0.9s linear infinite;
+}
+.spinner__track {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  opacity: 0.22;
+}
+.spinner__head {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+@keyframes spinner-turn {
+  to { transform: rotate(360deg); }
+}
+/* Over a viewport, where the background is whatever the renderer drew. */
+.spinner.is-over-scene {
+  color: #fff;
+  text-shadow: 0 1px 3px rgb(0 0 0 / 70%);
+}
+
+/* Covers the viewport while its contents are being replaced, so the old frame
+   is not read as the new one. */
+.viewport-veil {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(0 0 0 / 35%);
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* Fit-the-view button, in the corner furthest from the other viewport chrome. */
+.viewport-reset {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--fg-muted);
+  background: var(--control);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  z-index: 3;
+}
+.viewport-reset:hover { color: var(--fg); border-color: var(--warn); }
+
 /* The solver's own options. The same row as a slider, with room for a name
    rather than a one-word label, and set apart because they describe the
    reconstruction rather than the pipeline. */

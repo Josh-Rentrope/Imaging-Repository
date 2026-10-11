@@ -637,6 +637,7 @@ export default function EditorRoute() {
         volume={volume}
         results={results}
         busy={inFlight.length > 0}
+        uploading={uploading}
       />
 
       <aside className="sidebar">

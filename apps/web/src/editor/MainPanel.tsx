@@ -24,11 +24,13 @@ export function MainPanel({
   volume,
   results,
   busy,
+  uploading,
 }: {
   source: SourceSummary | null
   volume: VolumePayload | null
   results: ResultView[]
   busy: boolean
+  uploading: boolean
 }) {
   const [tab, setTab] = useState<TabId>('3d')
 
@@ -49,7 +51,13 @@ export function MainPanel({
       </div>
 
       {tab === '3d' ? (
-        <Viewport3D source={source} volume={volume} results={results} busy={busy} />
+        <Viewport3D
+          source={source}
+          volume={volume}
+          results={results}
+          busy={busy}
+          uploading={uploading}
+        />
       ) : (
         <div className="view-pane">
           <ImageView source={source} />
