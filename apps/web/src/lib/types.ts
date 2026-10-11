@@ -174,14 +174,20 @@ export interface ResultEnvelope {
   } | null
   artifacts: ResultArtifact[]
   segmentation?: Segmentation | null
-  measurements: Measurement[]
+  // Optional in the contract, so optional here. Declaring these required was
+  // worse than not typing them: it told every reader no guard was needed, and
+  // the first backend to omit the key took the result panel down instead of
+  // failing near the omission.
+  measurements?: Measurement[]
   quality?: {
     gate_passed: boolean
     rejections: { code: string; detail?: string; frame_ids?: number[] }[]
     coverage_pct?: number
   }
-  warnings: string[]
-  provenance: {
+  warnings?: string[]
+  // Also optional in the contract. Every reader already guards it; only the type
+  // disagreed.
+  provenance?: {
     backend: string
     started_at?: string
     duration_ms?: number
@@ -324,6 +330,11 @@ export interface SolversResponse {
 export interface SourceImage {
   index: number
   name: string
+  /**
+   * Photos only: the storage reference, so a capture can name this image and a
+   * solver can read it. Minted server-side because a ref is scoped to a viewer.
+   */
+  ref?: string
   /** Photos only: the original size on disk. */
   bytes?: number
   media_type?: string

@@ -10,7 +10,9 @@ import { DEFAULT_SETTINGS, type ViewportSettings } from './viewportSettings'
 // so the whole renderer is behind a dynamic import.
 const Scene = lazy(() => import('./Scene').then((module) => ({ default: module.Scene })))
 
-const MESH_FORMATS = new Set(['ply', 'stl'])
+/** Containers the geometry reader understands. A splat arrives in one of these
+ *  as well -- same file, no surface in it. */
+const GEOMETRY_FORMATS = new Set(['ply', 'stl'])
 
 /**
  * Scale indicator. When `verified` is false the geometry has no metric anchor,
@@ -133,7 +135,14 @@ export function Viewport3D({
       // by result rather than by artifact.
       const labels = artifacts.find((a) => a.kind === 'labels')
       for (const artifact of artifacts) {
-        if (artifact.kind !== 'mesh' || !MESH_FORMATS.has(artifact.format)) continue
+        // A `splat` is a vertex cloud: structure-from-motion recovers points and
+        // nothing connects them into a surface. It is shown rather than hidden
+        // -- the points are the result -- but it is drawn as points, and the
+        // panel says "pts" rather than "tris".
+        const pointCloud = artifact.kind === 'splat'
+        if (!pointCloud && artifact.kind !== 'mesh') continue
+        if (!GEOMETRY_FORMATS.has(artifact.format)) continue
+
         surfaces.push({
           id: result.id,
           meshRef: artifact.ref,
@@ -141,6 +150,7 @@ export function Viewport3D({
           visible: result.visible,
           clipped: result.clipped,
           color: result.color,
+          pointCloud,
           labelsRef: labels?.ref ?? null,
           labelsHeaderRef: labels?.header_ref ?? null,
         })

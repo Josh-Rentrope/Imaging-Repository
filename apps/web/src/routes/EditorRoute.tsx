@@ -13,6 +13,7 @@ import {
   workflowFor,
   type PipelineParams,
 } from '../editor/PipelineSection'
+import { randomId } from '../lib/ids'
 import { ResultsSection, type ResultView } from '../editor/ResultsSection'
 import { SourceSection } from '../editor/SourceSection'
 import { ExportSection } from '../editor/ExportSection'
@@ -44,18 +45,39 @@ const SUBMIT_LOCK_MS = 1000
  */
 const SUBMIT_ACK_TIMEOUT_MS = 30_000
 
-/** Capture descriptor for a source. Photos carry no depth unless told otherwise. */
-function buildCapture(source: SourceSummary, hasDepth: boolean, hasFiducial: boolean) {
-  const capture_id = crypto.randomUUID()
+/**
+ * Capture descriptor for a source. Photos carry no depth unless told otherwise.
+ *
+ * `frames` is what a pose solver actually works on: one entry per uploaded image,
+ * pointing at it. It is fetched rather than derived because a storage reference
+ * is scoped to a viewer and only the server can mint one -- building
+ * `sources/<id>/files/<name>` here would produce a ref that is refused, which is
+ * the whole point of the scoping.
+ *
+ * No `intrinsics`, and the capture contract requires them. That requirement was
+ * written for a device that knows its own optics; a folder of photographs does
+ * not, and a solver estimates them instead. Inventing a plausible focal length
+ * would be a number nobody measured, travelling as though somebody had.
+ */
+async function buildCapture(source: SourceSummary, hasDepth: boolean, hasFiducial: boolean) {
+  const capture_id = randomId()
 
   if (source.kind === 'dicom') {
     return { capture_id, modality: 'radiograph', source_id: source.source_id }
   }
 
+  const listed = await api.listImages(source.source_id)
+  const frames = listed.images.map((image) => ({
+    id: image.index,
+    name: image.name,
+    image_ref: image.ref,
+  }))
+
   return {
     capture_id,
     modality: hasDepth ? 'rgbd' : 'rgb',
     source_id: source.source_id,
+    frames,
     ...(hasDepth ? { depth: [{ frame_id: 0, depth_ref: 'depth/0', aligned_to_rgb: true }] } : {}),
     quality: {
       coverage_pct: 88,
@@ -326,7 +348,7 @@ export default function EditorRoute() {
         // Recorded on the job, not just held here: two stages under different
         // workflows are different pipelines, and the ops alone do not say which.
         workflow: workflowFor(workflow).label,
-        capture: buildCapture(activeSource, hasDepth, hasFiducial),
+        capture: await buildCapture(activeSource, hasDepth, hasFiducial),
       })
 
       // On screen before the backend has done anything. A segmentation runs for

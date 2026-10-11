@@ -25,6 +25,7 @@ import {
 } from 'react'
 
 import { api } from '../lib/api'
+import { randomId } from '../lib/ids'
 import type { SourceSummary } from '../lib/types'
 
 export interface WorkingSet {
@@ -73,7 +74,7 @@ interface EditorContextValue extends Structure {
 
 const STORAGE_KEY = 'bone-viewer.editor.structure.v2'
 
-const newId = () => crypto.randomUUID()
+const newId = () => randomId()
 
 function seed(): Structure {
   const workspaceId = newId()

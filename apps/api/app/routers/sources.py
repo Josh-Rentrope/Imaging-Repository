@@ -167,6 +167,13 @@ def list_images(
             {
                 "index": index,
                 "name": instance.file_name,
+                # The reference a pose solver reads the pixels through. Without
+                # it a client can list the files but not point at them, so a
+                # capture built in the browser carries no frames and every solver
+                # is handed an empty set. Mints here rather than in the client
+                # because a ref is scoped to a viewer and only this side knows
+                # which.
+                "ref": instance.ref,
                 "bytes": instance.bytes,
                 "media_type": _MEDIA_TYPES.get(
                     "." + instance.file_name.rsplit(".", 1)[-1].lower()

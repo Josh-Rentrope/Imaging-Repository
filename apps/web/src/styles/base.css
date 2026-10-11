@@ -1128,3 +1128,268 @@ pre {
   border-radius: 4px;
   font-size: 11px;
 }
+
+/* ── Failure ─────────────────────────────────────────────────────────────── */
+/* Shown in place of the app when something throws while rendering. Reachable
+   from a phone, so it has to be legible at that size and has to say something
+   useful -- a blank page is what this replaces. */
+
+.app-error {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 48px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.app-error h1 { margin: 0; font-size: 18px; }
+.app-error__message { white-space: pre-wrap; word-break: break-word; color: var(--danger); }
+.app-error__hint { margin: 0; color: var(--fg-muted); font-size: 12px; }
+.app-error__hint code { padding: 1px 4px; background: var(--control); border-radius: 3px; }
+
+.app-error__reload {
+  align-self: flex-start;
+  min-height: 44px;
+  padding: 0 20px;
+  font-weight: 600;
+  background: var(--accent);
+  color: #0d0f11;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+/* ── Capture ─────────────────────────────────────────────────────────────── */
+/* The one screen in this app built for a hand rather than a desk, and so the
+   only one with a media query. Sized for a phone first and relaxed upward,
+   because the phone is the case that cannot be fixed by scrolling: a control
+   that is the wrong size for a thumb is simply the wrong size. */
+
+.capture {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg);
+  /* The home indicator sits over the bottom of the screen on a modern iPhone. */
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+.capture__bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.capture__back {
+  color: var(--accent);
+  text-decoration: none;
+  padding: 8px 10px;
+  margin: -8px -10px;
+}
+
+.capture__where { display: flex; flex-direction: column; min-width: 0; }
+.capture__set { font-weight: 600; }
+.capture__workspace { color: var(--fg-muted); font-size: 12px; }
+
+.capture__modes {
+  display: flex;
+  gap: 6px;
+  padding: 10px 14px 0;
+}
+
+.capture__mode {
+  flex: 1;
+  min-height: 44px;
+  background: var(--control);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.capture__mode.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0d0f11;
+  font-weight: 600;
+}
+
+.capture__blurb {
+  margin: 12px 14px 0;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.capture__stage {
+  flex: 1;
+  min-height: 0;
+  padding: 14px;
+  display: flex;
+  justify-content: center;
+}
+
+.capture__panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: 520px;
+}
+
+.capture__viewfinder {
+  position: relative;
+  width: 100%;
+  /* Portrait, because the subject is held in a hand and the sensor's long edge
+     is the one that goes up it. */
+  aspect-ratio: 3 / 4;
+  max-height: 60vh;
+  background: #0d0f11;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.capture__video {
+  width: 100%;
+  height: 100%;
+  /* Contain, not cover: cropping the viewfinder would frame the shot
+     differently from what is stored, and the whole point is to know what was
+     taken. */
+  object-fit: contain;
+}
+
+.capture__overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  margin: 0;
+  color: var(--fg-muted);
+}
+
+.capture__recording {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 12px;
+}
+
+.capture__shutter {
+  min-height: 52px;
+  padding: 0 18px;
+  font-weight: 600;
+  background: var(--accent);
+  color: #0d0f11;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.capture__shutter:disabled { opacity: 0.5; cursor: default; }
+.capture__shutter.is-recording { background: var(--danger); border-color: var(--danger); color: #fff; }
+
+.capture__controls { display: flex; gap: 10px; align-items: stretch; }
+.capture__controls .capture__shutter { flex: 1; }
+
+.capture__toggle {
+  min-height: 52px;
+  padding: 0 16px;
+  background: var(--control);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.capture__toggle.is-on { border-color: var(--warn); color: var(--warn); }
+
+.capture__field {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
+.capture__field input {
+  width: 68px;
+  min-height: 32px;
+  padding: 0 8px;
+  background: var(--control);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.capture__hint { margin: 0; color: var(--fg-muted); font-size: 12px; }
+.capture__error { margin: 0 14px; color: var(--danger); font-size: 12px; }
+.capture__ok { margin: 0 14px; color: var(--accent); font-size: 12px; }
+
+.capture__tray {
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.capture__strip { display: flex; align-items: center; gap: 6px; overflow-x: auto; }
+
+.capture__thumb {
+  width: 46px;
+  height: 46px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.capture__more { color: var(--fg-muted); font-size: 12px; }
+
+.capture__clear {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  padding: 8px;
+  flex: 0 0 auto;
+}
+
+.capture__actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.capture__count { color: var(--fg-muted); font-size: 12px; }
+
+.capture__upload {
+  min-height: 48px;
+  padding: 0 22px;
+  font-weight: 600;
+  background: var(--accent);
+  color: #0d0f11;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.capture__upload:disabled { opacity: 0.4; cursor: default; }
+
+/* A tablet or a desktop: stop stretching controls across a wide window and put
+   the column in the middle where it reads as one thing. */
+@media (min-width: 720px) {
+  .capture__bar,
+  .capture__modes,
+  .capture__tray { padding-left: max(14px, calc((100% - 560px) / 2)); padding-right: max(14px, calc((100% - 560px) / 2)); }
+  .capture__blurb,
+  .capture__error,
+  .capture__ok { margin-left: max(14px, calc((100% - 560px) / 2)); margin-right: max(14px, calc((100% - 560px) / 2)); }
+  .capture__viewfinder { max-height: 52vh; }
+}

@@ -41,6 +41,11 @@ function summary(job: Job): string | null {
   const bits: string[] = []
   const mesh = result.artifacts.find((a) => a.kind === 'mesh')
   if (mesh?.triangles) bits.push(`${mesh.triangles.toLocaleString()} tris`)
+  // A point cloud has no triangles, and saying nothing about a result that
+  // plainly produced geometry reads as a failure. Different word on purpose:
+  // points are what structure-from-motion gives, and they are not a surface.
+  const cloud = result.artifacts.find((a) => a.kind === 'splat')
+  if (cloud?.vertices) bits.push(`${cloud.vertices.toLocaleString()} pts`)
   if (result.geometry?.threshold != null) bits.push(`${Math.round(result.geometry.threshold)} HU`)
   // The tell for a surface that can be clicked: one extracted from a mask
   // carries labels, one from a density threshold carries none.
@@ -52,7 +57,14 @@ function summary(job: Job): string | null {
   if (mesh?.triangles && before && before > mesh.triangles) {
     bits[0] = `${mesh.triangles.toLocaleString()} tris (from ${formatCount(before)})`
   }
-  if (result.measurements.length > 0) bits.push(`${result.measurements.length} measures`)
+  const measures = result.measurements?.length ?? 0
+  if (measures > 0) bits.push(`${measures} measures`)
+  // Which backend answered, but only when it is the stand-in. The fixture
+  // produces synthetic geometry -- a tooth arch that has nothing to do with
+  // whatever was uploaded -- and on screen it is otherwise identical to a real
+  // result. A workflow naming a stage the private core cannot do routes the
+  // WHOLE job to the fixture, so this is the only thing that says so.
+  if (job.backend === 'fixture') bits.push('synthetic')
   return bits.length > 0 ? bits.join(' · ') : null
 }
 

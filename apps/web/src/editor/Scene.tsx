@@ -47,6 +47,12 @@ export interface SceneSurface {
   /** Whether the cutting planes apply to this surface. */
   clipped: boolean
   color: [number, number, number]
+  /**
+   * A vertex cloud rather than a surface. Structure-from-motion gives points;
+   * there is no mesh until something connects them, and drawing points as a
+   * shaded surface would invent one.
+   */
+  pointCloud: boolean
   /** Per-vertex label sidecar, for a surface that came out of a segmentation. */
   labelsRef: string | null
   labelsHeaderRef: string | null
@@ -796,6 +802,20 @@ export function Scene({
         actor.getProperty().setAmbient(0.3)
         actor.getProperty().setDiffuse(0.8)
         actor.getProperty().setSpecular(0.1)
+
+        if (surface.pointCloud) {
+          // A vertex-only PLY gives the reader one single-point cell per vertex
+          // and no polys, so this draws as points either way; saying so
+          // explicitly stops a future representation change from ever shading a
+          // cloud as though it were a surface.
+          actor.getProperty().setRepresentationToPoints()
+          actor.getProperty().setPointSize(2)
+          // Points carry no normals, so lighting has nothing to work from and
+          // the result would be either flat black or arbitrarily shaded.
+          actor.getProperty().setAmbient(1)
+          actor.getProperty().setDiffuse(0)
+          actor.getProperty().setSpecular(0)
+        }
 
         const labels = await loadVertexLabels(surface, data.getPoints().getNumberOfPoints())
         if (cancelled) return
