@@ -100,6 +100,11 @@
           "maxItems": 6,
           "description": "[xmin, xmax, ymin, ymax, zmin, zmax] of the extracted surface, world space."
         },
+        "components": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Disconnected reconstructions the pose solver produced. More than one means part of the capture never related to the rest, and usually that the subject became its own model while the largest one is its surroundings."
+        },
         "frames": {
           "type": "integer",
           "minimum": 0,

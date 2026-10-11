@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import {
+  ALL_LABELS,
   buildStages,
+  colmapInPlay,
   DEFAULT_SIMPLIFY_MM,
+  DEFAULT_SOLVER_OPTIONS,
   DEFAULT_THRESHOLD,
   DEFAULT_WORKFLOW,
   PipelineSection,
@@ -86,14 +89,66 @@ async function buildCapture(source: SourceSummary, hasDepth: boolean, hasFiducia
   }
 }
 
-/** What to call a result: the operator's name if there is one, else the derived label. */
-function labelFor(ops: string[], job: Job): string {
+/** Stage parameters, read off the result rather than the request: a job restored
+ *  after a reload still has its envelope and no longer its submission. */
+function stageParams(job: Job, op: string): Record<string, unknown> {
+  return job.result?.provenance?.stages?.find((entry) => entry.op === op)?.params ?? {}
+}
+
+/** A structure name from the run's own legend, when the segmenter's list is not
+ *  in hand. */
+function declaredName(job: Job, id: number): string | null {
+  return job.result?.segmentation?.classes?.find((entry) => entry.id === id)?.name ?? null
+}
+
+/**
+ * What a result is called.
+ *
+ * The stages are already on the row's detail line for anyone who wants them. The
+ * name has one job — saying what is on screen — and
+ * `isolate_volume → segment → iso_surface` does not say it while "Esophagus"
+ * does. So it is taken from what produced the geometry, and named after the
+ * structure when the run picked exactly one.
+ */
+function labelFor(job: Job, names: Map<number, string>): string {
   if (job.name) return job.name
-  if (ops.length === 1 && ops[0] === Op.ISO_SURFACE) {
+
+  const ops = new Set(job.ops)
+
+  if (ops.has(Op.ISO_SURFACE)) {
+    const chosen = stageParams(job, Op.ISO_SURFACE).label
+
+    if (Array.isArray(chosen)) {
+      const wanted = chosen.map(Number).filter((id) => Number.isFinite(id))
+      if (wanted.length === 1) {
+        return names.get(wanted[0]) ?? declaredName(job, wanted[0]) ?? `Structure ${wanted[0]}`
+      }
+      if (wanted.length > 1) return `${wanted.length} structures`
+    }
+
+    // Every structure the mask holds. Named for the count once the run has one,
+    // because "Segmented surface" is the same three words for one structure and
+    // for thirty.
+    if (chosen === ALL_LABELS) {
+      const found = job.result?.segmentation?.classes?.length ?? 0
+      return found > 1 ? `${found} structures` : 'Segmented surface'
+    }
+
     const threshold = job.result?.geometry?.threshold
-    return threshold != null ? `Surface @ ${Math.round(threshold)}` : 'Surface'
+    return threshold != null ? `Surface @ ${Math.round(threshold)} HU` : 'Density surface'
   }
-  return ops.join(' → ')
+
+  if (ops.has(Op.RECONSTRUCT)) {
+    const solver = job.result?.geometry?.pose_solver
+    return solver ? `Point cloud (${solver})` : 'Point cloud'
+  }
+  if (ops.has(Op.ESTIMATE_POSES)) return 'Camera poses'
+  if (ops.has(Op.SEGMENT)) return 'Segmentation'
+  if (ops.has(Op.MEASURE)) return 'Measurements'
+  if (ops.has(Op.DETECT_CARIES)) return 'Caries detection'
+  if (ops.has(Op.PX2TOOTH)) return 'Panoramic teeth'
+  if (ops.has(Op.ISOLATE_VOLUME)) return 'Volume'
+  return job.ops.join(' → ')
 }
 
 export default function EditorRoute() {
@@ -106,6 +161,7 @@ export default function EditorRoute() {
     simplify: DEFAULT_SIMPLIFY_MM,
     labels: null,
     solver: null,
+    solverOptions: DEFAULT_SOLVER_OPTIONS,
   })
   const [workflow, setWorkflow] = useState('ct')
   const [hasDepth, setHasDepth] = useState(false)
@@ -266,6 +322,13 @@ export default function EditorRoute() {
     )
   }, [segmenter, results])
 
+  // Structure id to name, so a surface is called after the structure it is
+  // rather than after the stages that produced it.
+  const structureNames = useMemo(
+    () => new Map<number, string>((segmenter?.classes ?? []).map((entry) => [entry.id, entry.name])),
+    [segmenter],
+  )
+
   // Results already on the server, so a refresh does not mean running everything
   // again. The artifacts were always there; only the list was missing.
   useEffect(() => {
@@ -286,7 +349,7 @@ export default function EditorRoute() {
             .map<ResultView>((job, index) => ({
               id: job.job_id,
               job,
-              label: labelFor(job.ops, job),
+              label: labelFor(job, structureNames),
               detail: `${job.ops.join(' → ')} · ${job.result?.model_version ?? job.status}`,
               visible: true,
               clipped: true,
@@ -339,7 +402,14 @@ export default function EditorRoute() {
       if (mounted.current) setSubmitting(false)
     }, SUBMIT_ACK_TIMEOUT_MS)
 
-    const stages = buildStages(ops, selectedOps, params)
+    // The same predicate the form renders on, so a control that is on screen is
+    // a control whose value is sent.
+    const stages = buildStages(
+      ops,
+      selectedOps,
+      params,
+      colmapInPlay(solvers, shape, params.solver),
+    )
     const sourceKey = sourceId
 
     try {
@@ -358,7 +428,7 @@ export default function EditorRoute() {
         {
           id: submitted.job_id,
           job: submitted,
-          label: labelFor(submitted.ops, submitted),
+          label: labelFor(submitted, structureNames),
           detail: `${submitted.ops.join(' → ')} · ${submitted.status}`,
           visible: true,
           clipped: true,
@@ -434,7 +504,11 @@ export default function EditorRoute() {
     updateResults(sourceKeyFor(id), (list) =>
       list.map((entry) =>
         entry.id === id
-          ? { ...entry, job: { ...entry.job, name }, label: name ?? labelFor(entry.job.ops, { ...entry.job, name: null }) }
+          ? {
+              ...entry,
+              job: { ...entry.job, name },
+              label: name ?? labelFor({ ...entry.job, name: null }, structureNames),
+            }
           : entry,
       ),
     )
@@ -443,7 +517,7 @@ export default function EditorRoute() {
       updateResults(sourceKeyFor(id), (list) =>
         list.map((entry) =>
           entry.id === id
-            ? { ...entry, job: updated, label: labelFor(updated.ops, updated) }
+            ? { ...entry, job: updated, label: labelFor(updated, structureNames) }
             : entry,
         ),
       )

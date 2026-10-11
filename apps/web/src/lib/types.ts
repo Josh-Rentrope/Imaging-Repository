@@ -142,6 +142,19 @@ export interface ResultEnvelope {
   geometry?: {
     voxel_size_mm?: number
     frames_used?: number
+    /**
+     * Disconnected reconstructions the pose solver produced. More than one means
+     * part of the capture never related to the rest — usually that the subject
+     * became its own model while the largest one is its surroundings.
+     */
+    components?: number
+    /** Which pose solver produced the geometry, and where its poses came from. */
+    pose_solver?: string
+    pose_source?: string
+    poses_solved?: number
+    scale_known?: boolean
+    /** Mean reprojection error the solver reported, in pixels. */
+    reprojection_residual_px?: number
     registration_residual_mm?: number
     /**
      * Where the segmentation landed, relative to the volume it was computed on.

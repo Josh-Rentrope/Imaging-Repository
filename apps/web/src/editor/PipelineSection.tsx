@@ -140,6 +140,13 @@ export interface PipelineParams {
    * compared on the same photographs — each export records which ran.
    */
   solver: string | null
+  /**
+   * How the named solver is configured. Only ever sent when COLMAP runs — see
+   * `colmapInPlay`. Held here rather than in the form so the values survive
+   * changing workflow, which is what makes two runs on the same photographs
+   * comparable.
+   */
+  solverOptions: SolverOptions
 }
 
 /** Ticked automatically with the workflow; nothing here forces it. */
@@ -164,16 +171,27 @@ export function buildStages(
   ordered: string[],
   selected: string[],
   params: PipelineParams,
+  colmap: boolean,
 ): Stage[] {
   const segments = selected.includes(Op.SEGMENT)
   const sequence = [...selected].sort((a, b) => ordered.indexOf(a) - ordered.indexOf(b))
 
+  // The solver's name, omitted rather than sent as null when nothing was named:
+  // an absent parameter means "whichever is installed", and the backend treats
+  // an empty string the same way, so there is one spelling of that intent.
+  const solving = {
+    ...(params.solver ? { solver: params.solver } : {}),
+    ...(colmap ? solverParams(params.solverOptions) : {}),
+  }
+  const carriesSolver = Object.keys(solving).length > 0
+
   return sequence.map((op) => {
-    if (op === Op.ESTIMATE_POSES) {
-      // Omitted rather than sent as null when nothing was named: an absent
-      // parameter means "whichever is installed", and the backend treats an
-      // empty string the same way, so there is one spelling of that intent.
-      return params.solver ? { op, params: { solver: params.solver } } : { op }
+    // Attached to every stage that can start a solve, not only the first. The
+    // backend memoises one reconstruction per request, so whichever stage runs
+    // first fixes the options for the whole job — and a later stage carrying
+    // none would be read as "COLMAP's defaults" rather than as agreement.
+    if (op === Op.ESTIMATE_POSES || op === Op.RECONSTRUCT) {
+      return carriesSolver ? { op, params: solving } : { op }
     }
     if (op !== Op.ISO_SURFACE) return { op }
     // The threshold is meaningless once a mask is driving the surface, and a
@@ -214,6 +232,96 @@ export function solverChoices(
       }
       return { entry, offered: true, why: null }
     })
+}
+
+/** The framework whose options this form knows how to set. */
+export const COLMAP = 'colmap'
+
+/**
+ * COLMAP's own knobs.
+ *
+ * Every one is a COLMAP option, which is why they are offered — and sent — only
+ * when COLMAP is what will run. Handing them to another framework would be
+ * sending parameters that mean nothing to it.
+ *
+ * The defaults are COLMAP's, with two exceptions. `minTrack` is applied here
+ * after the solve rather than by COLMAP, and defaults to 5 per the range a
+ * tracker would use. `sequential` is left off and means "as the capture
+ * dictates", so ticking it forces sequence matching rather than being the only
+ * way to get it.
+ */
+export interface SolverOptions {
+  /** Photographs a point must be seen in before it is shown. */
+  minTrack: number
+  /** Force matching only between near neighbours. */
+  sequential: boolean
+  /** Features kept per photograph, before matching. */
+  maxNumFeatures: number
+  /**
+   * SIFT on oriented ellipses instead of circles. Several times the cost, and
+   * the lever that matters when a surface looks different from every angle —
+   * which is what a specular highlight does.
+   */
+  estimateAffineShape: boolean
+  domainSizePooling: boolean
+  /** Lower accepts weaker features, and more of them. */
+  peakThreshold: number
+  /** Lowe ratio. Lower is stricter about what counts as a match. */
+  maxRatio: number
+  /** Features two photographs must share to be treated as a pair. */
+  minNumMatches: number
+  /** Longest side matched at. 0 or less uses the photograph's own size. */
+  maxImageSize: number
+}
+
+export const DEFAULT_SOLVER_OPTIONS: SolverOptions = {
+  minTrack: 5,
+  sequential: false,
+  maxNumFeatures: 8192,
+  estimateAffineShape: false,
+  domainSizePooling: false,
+  peakThreshold: 0.0067,
+  maxRatio: 0.8,
+  minNumMatches: 15,
+  maxImageSize: 0,
+}
+
+/**
+ * The wire spelling, in one place so the form and the request cannot drift.
+ *
+ * `sequential` is sent only when ticked: absent is what asks the backend to
+ * decide from the capture, and sending `false` would overrule it.
+ */
+function solverParams(options: SolverOptions): Record<string, unknown> {
+  return {
+    min_track: options.minTrack,
+    max_num_features: options.maxNumFeatures,
+    estimate_affine_shape: options.estimateAffineShape,
+    domain_size_pooling: options.domainSizePooling,
+    peak_threshold: options.peakThreshold,
+    max_ratio: options.maxRatio,
+    min_num_matches: options.minNumMatches,
+    ...(options.sequential ? { sequential: true } : {}),
+    ...(options.maxImageSize > 0 ? { max_image_size: options.maxImageSize } : {}),
+  }
+}
+
+/**
+ * Whether COLMAP is what will actually run.
+ *
+ * The form and the request have to agree on this or a slider would move without
+ * changing anything: the options are COLMAP's, so they are shown when COLMAP is
+ * chosen and also when nothing is chosen and COLMAP is the only thing installed,
+ * which is the same situation.
+ */
+export function colmapInPlay(
+  solvers: SolverEntry[],
+  shape: InputShape,
+  chosen: string | null,
+): boolean {
+  const usable = solverChoices(solvers, shape).filter((choice) => choice.offered)
+  if (!usable.some(({ entry }) => entry.name === COLMAP)) return false
+  return chosen === COLMAP || (chosen === null && usable.length === 1)
 }
 
 export function shapeLabel(shape: string): string {
@@ -281,6 +389,10 @@ export function PipelineSection({
   // the job fails at the backend with the reason, after the upload. Cleared here
   // so the selection cannot outlive the data it was made for.
   const stale = params.solver !== null && !usable.some((c) => c.entry.name === params.solver)
+
+  const options = params.solverOptions
+  const setOptions = (patch: Partial<SolverOptions>) =>
+    onParamsChange({ ...params, solverOptions: { ...options, ...patch } })
   const extracting = params.labels === null ? knownLabels.length : params.labels.length
   // Nothing ticked is a job that would extract nothing. The button says so
   // rather than letting the backend answer with an error.
@@ -474,6 +586,159 @@ export function PipelineSection({
                 }
               />
             </p>
+          )}
+
+          {colmapInPlay(solvers, shape, params.solver) && (
+            <div className="solver-rows">
+              <p className="popover-hint" style={{ margin: '6px 0 2px' }}>
+                colmap
+                <Info
+                  text={
+                    'How COLMAP is asked to work. These are its own options, so they are shown ' +
+                    'only when COLMAP is what runs — another framework would be handed names it ' +
+                    'has never heard of.\n\n' +
+                    'Every one of them is recorded on the result, so two runs over the same ' +
+                    'photographs can be told apart afterwards.'
+                  }
+                />
+              </p>
+
+              <label
+                className="slider-row solver-row"
+                title="A point is shown only if this many photographs saw it. Raising it drops the points a couple of views agreed on, which sit in the air around a subject rather than on it."
+              >
+                <span className="slider-label">min frames</span>
+                <input
+                  type="range"
+                  min={3}
+                  max={20}
+                  step={1}
+                  value={options.minTrack}
+                  onChange={(event) => setOptions({ minTrack: Number(event.target.value) })}
+                />
+                <span className="slider-value mono">{options.minTrack}</span>
+              </label>
+
+              <label
+                className="slider-row solver-row"
+                title="Features kept per photograph before matching. More finds detail on a plain surface, and takes proportionally longer."
+              >
+                <span className="slider-label">features</span>
+                <select
+                  value={options.maxNumFeatures}
+                  onChange={(event) => setOptions({ maxNumFeatures: Number(event.target.value) })}
+                >
+                  <option value={4096}>4k</option>
+                  <option value={8192}>8k</option>
+                  <option value={16384}>16k</option>
+                  <option value={32768}>32k</option>
+                </select>
+                <span />
+              </label>
+
+              <label
+                className="slider-row solver-row"
+                title="Feature strength a point must reach to be kept. Lower accepts weaker ones: more features everywhere, including on noise."
+              >
+                <span className="slider-label">weakest</span>
+                <input
+                  type="range"
+                  min={0.002}
+                  max={0.012}
+                  step={0.0001}
+                  value={options.peakThreshold}
+                  onChange={(event) =>
+                    setOptions({ peakThreshold: Number(event.target.value) })
+                  }
+                />
+                <span className="slider-value mono">{options.peakThreshold.toFixed(4)}</span>
+              </label>
+
+              <label
+                className="slider-row solver-row"
+                title="How much closer a second-best match has to be before a match is accepted — COLMAP's ratio test. Lower is stricter and keeps fewer, better matches."
+              >
+                <span className="slider-label">strictness</span>
+                <input
+                  type="range"
+                  min={0.6}
+                  max={0.95}
+                  step={0.01}
+                  value={options.maxRatio}
+                  onChange={(event) => setOptions({ maxRatio: Number(event.target.value) })}
+                />
+                <span className="slider-value mono">{options.maxRatio.toFixed(2)}</span>
+              </label>
+
+              <label
+                className="slider-row solver-row"
+                title="Features two photographs must share before they are treated as a pair. Lower links weakly-overlapping views, at the cost of more wrong links."
+              >
+                <span className="slider-label">pair min</span>
+                <input
+                  type="range"
+                  min={4}
+                  max={40}
+                  step={1}
+                  value={options.minNumMatches}
+                  onChange={(event) => setOptions({ minNumMatches: Number(event.target.value) })}
+                />
+                <span className="slider-value mono">{options.minNumMatches}</span>
+              </label>
+
+              <label
+                className="slider-row solver-row"
+                title="Longest side features are taken at. Lower is much faster and needs far less memory, at the cost of detail — the option to reach for when a capture takes too long."
+              >
+                <span className="slider-label">max size</span>
+                <select
+                  value={options.maxImageSize}
+                  onChange={(event) => setOptions({ maxImageSize: Number(event.target.value) })}
+                >
+                  <option value={0}>full</option>
+                  <option value={3200}>3200</option>
+                  <option value={2400}>2400</option>
+                  <option value={1600}>1600</option>
+                </select>
+                <span />
+              </label>
+
+              <label
+                className="solver-toggle"
+                title="Match each feature to an oriented ellipse rather than a circle, so a patch is still recognised when the surface is seen at a different angle. Several times slower, and the option that matters most for a glossy subject."
+              >
+                <input
+                  type="checkbox"
+                  checked={options.estimateAffineShape}
+                  onChange={(event) => setOptions({ estimateAffineShape: event.target.checked })}
+                />
+                <span>shape-adaptive features</span>
+              </label>
+
+              <label
+                className="solver-toggle"
+                title="Pairs with shape-adaptive features: weighs matches so patches at different scales still correspond."
+              >
+                <input
+                  type="checkbox"
+                  checked={options.domainSizePooling}
+                  onChange={(event) => setOptions({ domainSizePooling: event.target.checked })}
+                />
+                <span>scale-invariant matching</span>
+              </label>
+
+              <label
+                className="solver-toggle"
+                title="Match only photographs near each other in the order given. Right for frames lifted from a video, wrong for a set of stills, where it would skip the pairs that hold the model together."
+              >
+                <input
+                  type="checkbox"
+                  checked={options.sequential}
+                  onChange={(event) => setOptions({ sequential: event.target.checked })}
+                />
+                <span>force sequence matching</span>
+              </label>
+            </div>
           )}
 
           {/* The ones it cannot offer, and why, rather than quietly omitting

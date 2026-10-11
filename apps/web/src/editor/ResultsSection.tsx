@@ -46,6 +46,11 @@ function summary(job: Job): string | null {
   // points are what structure-from-motion gives, and they are not a surface.
   const cloud = result.artifacts.find((a) => a.kind === 'splat')
   if (cloud?.vertices) bits.push(`${cloud.vertices.toLocaleString()} pts`)
+  // More than one disconnected reconstruction means part of the capture never
+  // related to the rest, and the largest is usually the surroundings rather than
+  // the subject. Worth a word, because the cloud on screen looks fine either way.
+  const components = result.geometry?.components
+  if (components && components > 1) bits.push(`${components} components`)
   if (result.geometry?.threshold != null) bits.push(`${Math.round(result.geometry.threshold)} HU`)
   // The tell for a surface that can be clicked: one extracted from a mask
   // carries labels, one from a density threshold carries none.

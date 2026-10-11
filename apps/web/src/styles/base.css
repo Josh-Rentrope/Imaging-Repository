@@ -317,6 +317,26 @@ button, select, input {
 
 .slider-label { color: var(--fg-muted); }
 
+/* The solver's own options. The same row as a slider, with room for a name
+   rather than a one-word label, and set apart because they describe the
+   reconstruction rather than the pipeline. */
+.solver-rows {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+}
+.solver-row { grid-template-columns: 72px 1fr 74px; }
+.solver-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.solver-toggle input { margin: 0; }
+
 .slider-value { text-align: right; }
 
 .slider-row input[type='range'] { width: 100%; min-width: 0; }

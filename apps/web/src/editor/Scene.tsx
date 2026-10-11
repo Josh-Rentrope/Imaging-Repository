@@ -116,6 +116,12 @@ interface SurfaceEntry {
   /** Per-vertex RGB, allocated on the first selection. */
   colours: Uint8Array | null
   colourArray: ReturnType<typeof vtkDataArray.newInstance> | null
+  /**
+   * Whether the geometry arrived with its own colour, as a structure-from-motion
+   * cloud does. Its colour lives in the same place a selection's does, so the
+   * selection effect has to restore it rather than switch scalars off.
+   */
+  vertexColours: boolean
 }
 
 interface Ctx {
@@ -795,6 +801,18 @@ export function Scene({
         const mapper = vtkMapper.newInstance()
         mapper.setInputData(data)
 
+        // A PLY carrying red/green/blue comes back with them promoted to a
+        // point-data array the reader names "RGB" and makes the active scalars.
+        // Structure-from-motion writes colour because it is the only thing that
+        // makes a sparse cloud readable: an uncoloured one draws the subject,
+        // its surroundings and the noise between them as one mass of points.
+        const vertexColours = data.getPointData().getScalars()?.getName() === 'RGB'
+        if (vertexColours) {
+          mapper.setScalarVisibility(true)
+          mapper.setScalarModeToUsePointData()
+          mapper.setColorModeToDirectScalars()
+        }
+
         const actor = vtkActor.newInstance()
         actor.setMapper(mapper)
         actor.getProperty().setColor(...surface.color)
@@ -828,6 +846,7 @@ export function Scene({
           labels,
           colours: null,
           colourArray: null,
+          vertexColours,
         } as unknown as SurfaceEntry)
 
         // The first thing on screen sets the camera; adding more later must not
@@ -883,7 +902,10 @@ export function Scene({
       const values = entry.labels?.values
 
       if (!picked || !values || !surface) {
-        entry.mapper.setScalarVisibility(false)
+        // Restored, not switched off: a cloud's own colour is scalars too, so
+        // disabling visibility here would grey out every point cloud the moment
+        // a selection changed anywhere in the scene.
+        entry.mapper.setScalarVisibility(entry.vertexColours)
         entry.mapper.modified()
         continue
       }
