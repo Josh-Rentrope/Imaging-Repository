@@ -65,15 +65,18 @@ async def stream(websocket: WebSocket) -> None:
     requested = [
         name for name in (websocket.query_params.get("topics") or "").split(",") if name
     ]
-    topics = [
-        topic
-        for topic in (_internal(name, resolution.folder) for name in requested)
-        if topic is not None
-    ]
+    named = [(name, _internal(name, resolution.folder)) for name in requested]
+    topics = [topic for _, topic in named if topic is not None]
 
     subscriber = progress.subscribe(topics, asyncio.get_running_loop())
     try:
-        await websocket.send_json({"type": "ready", "topics": requested})
+        # The names that were *accepted*, not the ones asked for. A client whose
+        # topic spelling is wrong otherwise gets `ready` and then nothing, which
+        # is indistinguishable from a job that has not started -- so the
+        # mismatch is reported in the one message the client is already reading.
+        await websocket.send_json(
+            {"type": "ready", "topics": [name for name, topic in named if topic is not None]}
+        )
         while True:
             updates = await subscriber.drain()
             if not updates:

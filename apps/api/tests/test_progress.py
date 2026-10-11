@@ -131,12 +131,31 @@ def test_a_published_update_arrives_on_the_socket(client):
         assert message["fraction"] == 0.25
 
 
-def test_an_unknown_topic_is_ignored_rather_than_refused(client):
-    """A name we do not serve is answered with `ready` and then nothing, so a
-    client that guesses a topic shape gets silence instead of an error it has no
-    way to act on."""
+def test_ready_reports_what_was_accepted_and_not_what_was_asked_for(client):
+    """The difference is the whole diagnostic.
+
+    A name we do not serve is dropped, and a client that spelled one wrong would
+    otherwise see a healthy connection and no progress — indistinguishable from a
+    job that has not started. Echoing what was accepted turns that into a fact
+    the client can check, in a message it is already reading.
+    """
     with client.websocket_connect("/ws?topics=workspace:whatever") as socket:
-        assert socket.receive_json() == {"type": "ready", "topics": ["workspace:whatever"]}
+        assert socket.receive_json() == {"type": "ready", "topics": []}
+
+
+def test_a_bare_id_is_not_a_topic(client):
+    """The vocabulary is `kind:ident`, and this is the shape the browser client
+    got wrong: it sent job ids with no prefix, every one was dropped, and the
+    socket still reported itself connected."""
+    with client.websocket_connect("/ws?topics=6f2b1c9e-0000-4000-8000-000000000000") as socket:
+        assert socket.receive_json() == {"type": "ready", "topics": []}
+
+
+def test_the_prefixed_form_of_the_same_id_is_a_topic(client):
+    with client.websocket_connect("/ws?topics=job:6f2b1c9e-0000-4000-8000-000000000000") as socket:
+        assert socket.receive_json()["topics"] == [
+            "job:6f2b1c9e-0000-4000-8000-000000000000"
+        ]
 
 
 def test_a_job_reports_that_it_finished(client):

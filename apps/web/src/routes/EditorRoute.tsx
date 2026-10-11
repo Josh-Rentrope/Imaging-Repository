@@ -17,7 +17,14 @@ import {
   type PipelineParams,
 } from '../editor/PipelineSection'
 import { randomId } from '../lib/ids'
-import { isLive, settled, subscribeProgress, watch, type Progress } from '../lib/stream'
+import {
+  isLive,
+  settled,
+  subscribeProgress,
+  waitForOffline,
+  watch,
+  type Progress,
+} from '../lib/stream'
 import { ResultsSection, type ResultView } from '../editor/ResultsSection'
 import { SourceSection } from '../editor/SourceSection'
 import { ExportSection } from '../editor/ExportSection'
@@ -38,16 +45,6 @@ import { useEditor } from '../state/editor'
 //: of minutes rather than the seconds a marching-cubes pass takes.
 const POLL_INTERVAL_MS = 1500
 const POLL_ATTEMPTS = 800
-
-/**
- * How often to poll while the event stream is up.
- *
- * Polling is not removed, only demoted: the stream carries the updates, and this
- * is what keeps a socket that will not open from being a broken app. Slow enough
- * that it costs nothing while the stream is doing the work, and it speeds back
- * up by itself the moment the socket drops.
- */
-const POLL_FALLBACK_MS = 15_000
 
 /** How long Run stays disabled after a click, whatever the server does. */
 const SUBMIT_LOCK_MS = 1000
@@ -578,17 +575,22 @@ export default function EditorRoute() {
         ),
       )
 
-    // Both run, and whichever finishes first ends the wait. The poll is not
-    // removed -- it is the reason a socket that will not open is not a broken
-    // app -- but it drops to a background heartbeat while the stream is up.
+    // Both run, and whichever finishes first ends the wait. Polling stops
+    // entirely while the socket is up: the terminal status arrives on the
+    // stream, and a client that reconnects is handed the ending it missed,
+    // because the server keeps a finished job's last value. The poll is only
+    // there for a socket that will not open or has gone away -- which is what
+    // stops the stream being load-bearing.
     let stopped = false
     const stopWatching = watch(jobId)
 
     const poll = async () => {
       for (let attempt = 0; attempt < POLL_ATTEMPTS && !stopped; attempt += 1) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, isLive() ? POLL_FALLBACK_MS : POLL_INTERVAL_MS),
-        )
+        if (isLive()) {
+          await waitForOffline()
+          if (stopped || !mounted.current) return
+        }
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
         if (!mounted.current || stopped) return
 
         const job = await api.getJob(jobId)

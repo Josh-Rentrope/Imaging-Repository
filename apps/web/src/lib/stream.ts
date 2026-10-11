@@ -59,11 +59,14 @@ const listeners = new Set<(progress: Progress) => void>()
  * Vite proxy rewrites `/api` away) and absolute in a deployment, so a relative
  * one is resolved against the page.
  */
-export function streamUrl(topics: string[]): string {
+export function streamUrl(jobIds: string[]): string {
   const base = API_BASE.startsWith('http') ? API_BASE : `${window.location.origin}${API_BASE}`
   const url = new URL(`${base}/ws`)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-  url.searchParams.set('topics', topics.join(','))
+  // Named, not bare. The server's vocabulary is `kind:ident` and a name it does
+  // not recognise is dropped — which is a silent failure, so the shape has to be
+  // the one it expects rather than the one this side finds convenient.
+  url.searchParams.set('topics', jobIds.map((id) => `job:${id}`).join(','))
   return url.toString()
 }
 
@@ -98,6 +101,21 @@ function handle(raw: string): void {
   }
 }
 
+function accepted(message: Wire & { topics?: string[] }): void {
+  // Asked for three, given none: the two sides disagree about what a topic is
+  // called, and every symptom of that is the connection looking healthy. Said
+  // out loud for the same reason a dropped vertex-label array is: silence and
+  // success are otherwise indistinguishable.
+  const wanted = watched.size
+  const given = message.topics?.length ?? 0
+  if (wanted > 0 && given === 0) {
+    console.warn(
+      `[stream] the server accepted none of the ${wanted} topic(s) asked for; ` +
+        'progress will not arrive. Check the topic names against the route.',
+    )
+  }
+}
+
 function open(): void {
   if (socket || watched.size === 0) return
   if (retry !== null) {
@@ -117,13 +135,26 @@ function open(): void {
   opened.onopen = () => {
     live = true
   }
-  opened.onmessage = (event) => handle(String(event.data))
+  opened.onmessage = (event) => {
+    const raw = String(event.data)
+    try {
+      const parsed = JSON.parse(raw) as Wire & { topics?: string[] }
+      if (parsed.type === 'ready') {
+        accepted(parsed)
+        return
+      }
+    } catch {
+      // `handle` re-parses and ignores it; nothing here needs to care.
+    }
+    handle(raw)
+  }
   opened.onerror = () => {
     // `onclose` always follows; that is where the retry is scheduled.
     opened.close()
   }
   opened.onclose = () => {
     live = false
+    wentOffline()
     if (socket === opened) socket = null
     // Only while something is still being followed: a page with no jobs in
     // flight should not hold a socket open, nor retry one.
@@ -195,6 +226,25 @@ export function settled(jobId: string): Promise<void> {
 /** Whether the socket is currently open. What the poll interval keys off. */
 export function isLive(): boolean {
   return live
+}
+
+/**
+ * Resolves once the socket is down — immediately if it already is.
+ *
+ * What lets the caller stop polling entirely while the stream is up. The
+ * terminal update arrives on the socket, and `finish` leaves its value in place
+ * on the server, so a client that reconnects after a drop is handed the ending
+ * it missed rather than waiting for one that already happened.
+ */
+export function waitForOffline(): Promise<void> {
+  if (!live) return Promise.resolve()
+  return new Promise((resolve) => offline.push(resolve))
+}
+
+const offline: (() => void)[] = []
+
+function wentOffline(): void {
+  for (const resolve of offline.splice(0)) resolve()
 }
 
 export function subscribeProgress(listener: (progress: Progress) => void): () => void {
