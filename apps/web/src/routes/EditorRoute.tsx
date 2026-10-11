@@ -17,6 +17,7 @@ import {
   type PipelineParams,
 } from '../editor/PipelineSection'
 import { randomId } from '../lib/ids'
+import { isLive, settled, subscribeProgress, watch, type Progress } from '../lib/stream'
 import { ResultsSection, type ResultView } from '../editor/ResultsSection'
 import { SourceSection } from '../editor/SourceSection'
 import { ExportSection } from '../editor/ExportSection'
@@ -37,6 +38,16 @@ import { useEditor } from '../state/editor'
 //: of minutes rather than the seconds a marching-cubes pass takes.
 const POLL_INTERVAL_MS = 1500
 const POLL_ATTEMPTS = 800
+
+/**
+ * How often to poll while the event stream is up.
+ *
+ * Polling is not removed, only demoted: the stream carries the updates, and this
+ * is what keeps a socket that will not open from being a broken app. Slow enough
+ * that it costs nothing while the stream is doing the work, and it speeds back
+ * up by itself the moment the socket drops.
+ */
+const POLL_FALLBACK_MS = 15_000
 
 /** How long Run stays disabled after a click, whatever the server does. */
 const SUBMIT_LOCK_MS = 1000
@@ -169,6 +180,9 @@ export default function EditorRoute() {
 
   // Results are kept per source so switching away and back does not lose them.
   const [resultsBySource, setResultsBySource] = useState<Record<string, ResultView[]>>({})
+  // Live progress, keyed by job id and held apart from the results: it changes
+  // several times a second and must not rebuild the result list each time.
+  const [progress, setProgress] = useState<Record<string, Progress>>({})
   const [volume, setVolume] = useState<VolumePayload | null>(null)
 
   // Job ids still being polled. A list rather than a flag: several can be in
@@ -193,6 +207,10 @@ export default function EditorRoute() {
       mounted.current = false
     }
   }, [])
+
+  // Progress, on its own socket, into its own state. Kept apart from the results
+  // so a bar moving several times a second does not rebuild the result list.
+  useEffect(() => subscribeProgress((update) => setProgress((current) => ({ ...current, [update.taskId]: update }))), [])
 
   const sourceId = activeSource?.source_id ?? null
   const results = sourceId ? (resultsBySource[sourceId] ?? []) : []
@@ -547,33 +565,61 @@ export default function EditorRoute() {
       }
     }
 
-    try {
-      for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
-        if (!mounted.current) return
+    const merge = (job: Job) =>
+      updateResults(sourceKey, (list) =>
+        list.map((entry) =>
+          entry.id === jobId
+            ? {
+                ...entry,
+                job,
+                detail: `${job.ops.join(' → ')} · ${job.result?.model_version ?? job.status}`,
+              }
+            : entry,
+        ),
+      )
+
+    // Both run, and whichever finishes first ends the wait. The poll is not
+    // removed -- it is the reason a socket that will not open is not a broken
+    // app -- but it drops to a background heartbeat while the stream is up.
+    let stopped = false
+    const stopWatching = watch(jobId)
+
+    const poll = async () => {
+      for (let attempt = 0; attempt < POLL_ATTEMPTS && !stopped; attempt += 1) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, isLive() ? POLL_FALLBACK_MS : POLL_INTERVAL_MS),
+        )
+        if (!mounted.current || stopped) return
 
         const job = await api.getJob(jobId)
         if (!mounted.current) return
 
-        updateResults(sourceKey, (list) =>
-          list.map((entry) =>
-            entry.id === jobId
-              ? {
-                  ...entry,
-                  job,
-                  detail: `${job.ops.join(' → ')} · ${job.result?.model_version ?? job.status}`,
-                }
-              : entry,
-          ),
-        )
-
+        merge(job)
         if (!['queued', 'running'].includes(job.status)) return
       }
+    }
+
+    try {
+      await Promise.race([settled(jobId), poll()])
     } catch {
       // A dropped poll is not worth a banner over. The row keeps what it last
       // knew and the job is still the backend's; reloading re-reads it.
     } finally {
+      stopped = true
+      // Unsubscribing also drops any resolver still waiting on this job, so a
+      // page that navigates away mid-run leaves nothing behind.
+      stopWatching()
       settle()
+    }
+
+    // Once, for the finished record. The stream says a job ended; the record is
+    // where the result actually is, and one read of it beats two sources of
+    // truth for the same thing.
+    try {
+      const job = await api.getJob(jobId)
+      if (mounted.current) merge(job)
+    } catch {
+      // Left as it was. The next load re-reads it.
     }
   }
 
@@ -658,6 +704,7 @@ export default function EditorRoute() {
             results={results}
             sourceKind={activeSource?.kind ?? null}
             workflow={workflowFor(workflow).label}
+            progress={progress}
             onToggleVisible={(id) =>
               updateResults(sourceId, (list) =>
                 list.map((r) => (r.id === id ? { ...r, visible: !r.visible } : r)),

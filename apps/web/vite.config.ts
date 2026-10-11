@@ -14,6 +14,10 @@ export default defineConfig({
       '/api': {
         target: API_TARGET,
         changeOrigin: true,
+        // Without this the proxy answers the upgrade with a plain HTTP response
+        // and the event stream simply never connects -- in dev only, which is
+        // the worst place for it to differ from the deployment.
+        ws: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
       },
     },

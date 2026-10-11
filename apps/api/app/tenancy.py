@@ -33,8 +33,9 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
-from fastapi import HTTPException, Request, status
+from fastapi import HTTPException, status
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.requests import HTTPConnection, Request
 from starlette.responses import Response
 
 from .config import Settings, get_settings
@@ -104,15 +105,23 @@ class Resolution:
         return self.viewer_id is not None
 
 
-def resolve(request: Request, settings: Settings) -> Resolution:
+def resolve(connection: HTTPConnection, settings: Settings) -> Resolution:
+    """Which viewer a connection belongs to.
+
+    Takes an `HTTPConnection` rather than a `Request` because a WebSocket is one
+    too, and needs the same answer. `ViewerMiddleware` cannot give it — that is
+    HTTP-only middleware and a WebSocket upgrade never passes through it — so the
+    stream route calls this itself, and having one implementation is what stops
+    the two transports disagreeing about who is asking.
+    """
     if not settings.multi_tenant:
         return Resolution(None, None)
 
-    peer = request.client.host if request.client else None
+    peer = connection.client.host if connection.client else None
     if settings.loopback_is_local_viewer and is_loopback(peer):
         return Resolution(None, LOCAL_FOLDER)
 
-    presented = request.cookies.get(settings.viewer_cookie_name)
+    presented = connection.cookies.get(settings.viewer_cookie_name)
     if is_valid_viewer_id(presented):
         assert presented is not None
         return Resolution(None, folder_for(presented))

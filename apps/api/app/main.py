@@ -16,9 +16,11 @@ from .jobs import JobStore
 from .observability import AccessLogMiddleware, configure, logger, startup_report
 from .pipeline import BackendRegistry
 from .pipeline import solvers as solver_registry
+from .progress import Progress
 from .routers import (
     artifacts,
     diagnostics,
+    events,
     exports,
     health,
     jobs,
@@ -72,6 +74,9 @@ async def lifespan(app: FastAPI):
     # the normal case for a checkout of this repo, and is not an error.
     solver_registry.load_registered()
     app.state.settings = settings
+    # Live progress for whatever is running. Process-wide and in memory: it
+    # describes runs in flight, and a restart ends them.
+    app.state.progress = Progress()
     # One store for the process, scoped to whichever viewer is in play at the
     # moment of each call. Every holder below therefore stays viewer-agnostic.
     app.state.storage = ViewerScopedStorage(
@@ -88,6 +93,7 @@ async def lifespan(app: FastAPI):
     app.state.job_store = JobStore(
         app.state.registry,
         storage=app.state.storage,
+        progress=app.state.progress,
         # With tenancy on there is no viewer at startup, so there is no folder
         # that could be read back safely. Each viewer's history is loaded on
         # their first request instead.
@@ -150,6 +156,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(health.router)
+    app.include_router(events.router)
     app.include_router(diagnostics.router)
     app.include_router(segmenter.router)
     app.include_router(jobs.router)

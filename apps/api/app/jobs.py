@@ -34,6 +34,7 @@ from .pipeline import (
     InferenceRequest,
     OpNotSupported,
 )
+from .progress import Progress, current_reporter, job_topic
 from .storage import Storage
 from .tenancy import current_folder
 
@@ -63,8 +64,12 @@ class JobStore:
         storage: Storage | None = None,
         max_jobs: int = MAX_JOBS,
         preload: bool = True,
+        progress: Progress | None = None,
     ) -> None:
         self._registry = registry
+        # Where a running job's progress is published. Optional so the store can
+        # be built on its own, which is what most of the tests do.
+        self._progress = progress
         # Held so deleting a job can delete what it produced, rather than
         # leaving the bytes behind for the next walk of the store to find.
         self._storage = storage
@@ -196,6 +201,11 @@ class JobStore:
                 self._storage.remove_tree(_job_key(job_id))
                 logger.debug("removed record for job %s", job_id)
         self._remove_artifacts(job)
+        if self._progress is not None:
+            # Its last progress value goes with it. Nothing else bounds these:
+            # a finished job keeps its value on purpose, so deleting the job is
+            # the only thing that ever takes one away.
+            self._progress.forget(job_topic(job_id, _viewer()))
         return job
 
     def _remove_artifacts(self, job: Job) -> None:
@@ -317,6 +327,13 @@ class JobStore:
         for them and nowhere else.
         """
         token = current_folder.set(viewer or None)
+        topic = job_topic(job.job_id, viewer)
+        # Published from this thread and consumed on the event loop. Set here for
+        # the same reason the folder is: a bare thread starts with a fresh
+        # context, so nothing the request set is visible without this.
+        reporter_token = current_reporter.set(
+            None if self._progress is None else self._progress.reporter(topic, job.job_id)
+        )
         try:
             self._replace(job.job_id, status=JobStatus.RUNNING)
             backend = self._registry.resolve(job.ops, request.backend)
@@ -343,6 +360,16 @@ class JobStore:
             finished = self._replace(job.job_id, finished_at=datetime.now(UTC))
             if finished is not None:
                 self._persist(finished)
+            if self._progress is not None and finished is not None:
+                # Last, so a client that reacts by reading the record finds the
+                # finished one. Told before it is stored it would race itself.
+                self._progress.finish(
+                    topic,
+                    job.job_id,
+                    finished.status,
+                    "failed" if finished.error else "done",
+                )
+            current_reporter.reset(reporter_token)
             current_folder.reset(token)
 
     def _remember(self, job: Job) -> None:

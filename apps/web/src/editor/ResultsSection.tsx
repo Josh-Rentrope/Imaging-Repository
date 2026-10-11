@@ -1,5 +1,7 @@
 import { useState } from 'react'
 
+import { ProgressBar } from '../components/ProgressBar'
+import type { Progress } from '../lib/stream'
 import type { Job, SourceKind } from '../lib/types'
 import { Info } from './Info'
 import { ProvenanceHover } from './ProvenancePopup'
@@ -77,6 +79,7 @@ function ResultRow({
   result,
   sourceKind,
   workflow,
+  progress,
   onToggleVisible,
   onToggleClipped,
   onRemove,
@@ -85,6 +88,8 @@ function ResultRow({
   result: ResultView
   sourceKind: SourceKind | null
   workflow: string | null
+  /** Live progress for this job, when anything is streaming it. */
+  progress?: Progress
   onToggleVisible: () => void
   onToggleClipped: () => void
   onRemove: () => void
@@ -162,7 +167,17 @@ function ResultRow({
           {result.job.error}
         </p>
       ) : pending ? (
-        <div className="result-meta mono pending-text">{result.job.status}…</div>
+        // Falls back to the status word when nothing is streaming: a bar that
+        // never moves is worse than a label that stays honest.
+        <ProgressBar
+          label={progress?.label || `${result.job.status}…`}
+          fraction={progress?.fraction ?? null}
+          detail={
+            progress?.done != null && progress.total
+              ? `${progress.done}/${progress.total}`
+              : undefined
+          }
+        />
       ) : (
         <>
           <div className="result-meta mono">
@@ -194,6 +209,7 @@ export function ResultsSection({
   results,
   sourceKind,
   workflow,
+  progress,
   onToggleVisible,
   onToggleClipped,
   onRemove,
@@ -204,6 +220,12 @@ export function ResultsSection({
   /** Shared by every row: results are listed per source. */
   sourceKind: SourceKind | null
   workflow: string | null
+  /**
+   * Live progress by job id, kept beside the results rather than inside them:
+   * this changes several times a second, and folding it in would rebuild every
+   * row on every tick.
+   */
+  progress: Record<string, Progress>
   onToggleVisible: (id: string) => void
   onToggleClipped: (id: string) => void
   onRemove: (id: string) => void
@@ -234,6 +256,7 @@ export function ResultsSection({
             result={result}
             sourceKind={sourceKind}
             workflow={workflow}
+            progress={progress[result.id]}
             onToggleVisible={() => onToggleVisible(result.id)}
             onToggleClipped={() => onToggleClipped(result.id)}
             onRemove={() => onRemove(result.id)}
