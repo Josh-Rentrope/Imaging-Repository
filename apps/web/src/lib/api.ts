@@ -153,6 +153,23 @@ export function artifactUrl(ref: string): string {
 }
 
 /**
+ * One windowed image from a source, as a URL. Shared by the Image View and the
+ * 3D plane texture, so a hardcoded path cannot 404 in only one of them.
+ */
+export function sliceUrl(
+  sourceId: string,
+  index: number,
+  window: { center: number | null; width: number | null } | null,
+): string {
+  const base = `${API_BASE}/sources/${sourceId}/images/${index}`
+  if (!window || (window.center === null && window.width === null)) return base
+  const params = new URLSearchParams()
+  if (window.center !== null) params.set('level', String(window.center))
+  if (window.width !== null) params.set('window', String(window.width))
+  return `${base}?${params}`
+}
+
+/**
  * Read an artifact.
  *
  * A mesh or a volume is still a read against the API, so it carries the viewer

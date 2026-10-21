@@ -588,6 +588,34 @@ button.ghost {
   color: var(--fg-muted);
 }
 
+/* Why a source opened in the Image View rather than the 3D one. */
+.view-note {
+  margin: 0;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--warn);
+  font-size: 12px;
+}
+
+/* Marks a cut face that is a reconstruction, not one of the scan's own slices.
+   Moved by transform only, so repositioning every frame does not re-lay out. */
+.slice-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 2;
+  padding: 1px 6px;
+  background: rgba(20, 23, 26, 0.72);
+  border: 1px solid var(--warn);
+  border-radius: 3px;
+  color: var(--warn);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
 /* ── Side panel ──────────────────────────────────────────────────────────── */
 
 .sidebar {

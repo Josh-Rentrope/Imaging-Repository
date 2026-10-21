@@ -8,6 +8,7 @@ import {
   BACKGROUNDS,
   DENSITY_PRESETS,
   fractionToValue,
+  isDensityFilter,
   OPACITY_UNIT_MAX,
   OPACITY_UNIT_MIN,
   valueToFraction,
@@ -191,6 +192,18 @@ export function ViewportControls({
               planes
               <Info text="A plane clips away everything on one side, so you can see into the volume. Off by default, which keeps the canvas free for orbiting. A plane affects the volume always and a surface only if that result is marked ✂." />
             </p>
+            <label className="field" style={{ marginBottom: 8 }}>
+              <input
+                type="checkbox"
+                checked={settings.showSlice}
+                onChange={(event) => patch({ showSlice: event.target.checked })}
+              />
+              <span className="field-label">show the slice at each cut</span>
+            </label>
+            <p className="popover-hint" style={{ margin: '0 0 8px' }}>
+              cut face
+              <Info text="Draws the image at each cut, so an opened volume has a face instead of being hollow. It uses the same colour ramp as the volume, so what is inside a cut matches the surface it was cut from. A cut that is not perpendicular to the scan's own axes is interpolated between slices, and is labelled “inferred” — it is a reconstruction, not one of the acquired slices." />
+            </p>
             {AXES.map((axis) => {
               const plane = settings.planes[axis]
               return (
@@ -278,7 +291,7 @@ export function ViewportControls({
 
             <p className="popover-hint">
               density window
-              <Info text="Values below the low threshold are dropped and those above the high one are capped, unless the band-pass toggle takes them back to nothing. On a CT the raw values are Hounsfield units, so bone sits around 300 and above." />
+              <Info text="A filter, not a threshold: opacity peaks at the middle of the window and tapers to nothing at both ends, so the tissue you selected is what you see. Anything narrower than the full range is treated this way. On a CT the raw values are Hounsfield units, so bone sits around 300 and above." />
             </p>
 
             <div className="controls" style={{ marginBottom: 8 }}>
@@ -317,6 +330,16 @@ export function ViewportControls({
               onChange={(value) => patch({ density: [low, Math.max(value, low)] })}
             />
 
+            {/* The filter peaks in the middle, which the two sliders do not show. */}
+            {valueRange && isDensityFilter(settings.density) ? (
+              <p className="popover-hint" style={{ margin: '2px 0 6px' }}>
+                <span className="mono">
+                  peak ~{Math.round(fractionToValue((low + high) / 2, valueRange))} HU
+                </span>
+                <Info text="Opacity peaks at the middle of the window and tapers to nothing at both ends, so the middle is what you see most of. If the peak is not the tissue you are after, move both ends rather than one." />
+              </p>
+            ) : null}
+
             <label className="field" style={{ marginTop: 6 }}>
               <input
                 type="checkbox"
@@ -327,7 +350,7 @@ export function ViewportControls({
             </label>
             <p className="popover-hint" style={{ margin: '0 0 4px' }}>
               band-pass
-              <Info text="Drop opacity again above the high value. Left off, everything denser than it keeps peak opacity, so enamel, metal and restorations sit in front of the bone." />
+              <Info text="Nothing denser than the high value is drawn at all — bone stays gone when you are looking at soft tissue. Left off, denser structures come back faintly rather than vanishing, which keeps them locatable while you work inside the window." />
             </p>
 
             <div className="plane-block" style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid var(--border)' }}>

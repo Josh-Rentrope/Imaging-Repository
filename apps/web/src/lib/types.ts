@@ -259,9 +259,32 @@ export interface SourceSummary {
   bytes_total: number
   headerless: boolean
   renderable: boolean
-  /** Present when renderable is false: why there is nothing to draw. */
+  /** A failure only when `presentation` is 'none'; for a plane it describes it. */
   render_reason: string | null
+  /** What this source is made of, which decides how the viewport draws it. */
+  presentation: Presentation
+  /** Images in a `plane` source. Zero for a volume. */
+  plane_count: number
+  /** Tag the pixel spacing came from, or null when the scale is unknown. */
+  spacing_source: string | null
+  /** Slices discarded because their position was already occupied. */
+  dropped_slices: number
+  /** False when the series has positions but they are not one acquisition. */
+  coherent: boolean
+  /** The measurements behind that verdict. */
+  coherence: {
+    slices: number
+    gap_mm: number | null
+    irregular_fraction: number
+    stray_gaps: number
+    orientation_spread_deg: number
+    coherent: boolean
+    reasons: string[]
+  } | null
 }
+
+/** A stack of slices, a set of flat images, or nothing drawable. */
+export type Presentation = 'volume' | 'plane' | 'none'
 
 /** A dataset the app can pull in from a URL. */
 export interface SampleEntry {
@@ -351,17 +374,33 @@ export interface SourceImage {
   /** Photos only: the original size on disk. */
   bytes?: number
   media_type?: string
+
+  /** Plane sources only: which frame of its own file this is. */
+  frame?: number
+  rows?: number
+  columns?: number
+  /** Plane sources only: [x, y] mm per pixel — not DICOM's [row, column] — or
+   *  null when the file declares no scale. */
+  spacing?: [number, number] | null
+  spacing_source?: string | null
+  origin?: [number, number, number]
+  direction?: [number, number, number, number, number, number, number, number, number]
+  window_center?: number | null
+  window_width?: number | null
 }
 
 export interface SourceImages {
   source_id: string
   kind: SourceKind
-  /** Present for DICOM: the plane the slices are cut on. */
+  /** Present for DICOM: the plane the slices are cut on, or "plane" itself. */
   axis?: string
+  presentation?: Presentation
   count: number
-  /** DICOM only: the series window, and the spacing between listed slices. */
+  /** DICOM volumes only: the series window, and the spacing between slices. */
   window?: { center: number | null; width: number | null }
   slice_spacing_mm?: number | null
+  /** Plane sources only: why they are planes rather than a volume. */
+  note?: string | null
   images: SourceImage[]
 }
 

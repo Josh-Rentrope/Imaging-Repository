@@ -3,7 +3,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState, type RefObject } 
 import { Spinner } from '../components/Spinner'
 import type { ResultEnvelope, SourceSummary, VolumePayload } from '../lib/types'
 import type { ResultView } from './ResultsSection'
-import type { SceneModel, SceneSelection, SceneSurface } from './Scene'
+import type { SceneModel, ScenePlane, SceneSelection, SceneSurface } from './Scene'
 import { ViewportControls } from './ViewportControls'
 import { DEFAULT_SETTINGS, type ViewportSettings } from './viewportSettings'
 
@@ -36,6 +36,7 @@ function ScaleTag({ scale }: { scale: ResultEnvelope['scale'] }) {
 
 function placeholderFor(source: SourceSummary | null): string {
   if (!source) return 'Drop a source to begin'
+  // Only a failure when nothing is drawable; for a flat source it is a description.
   if (!source.renderable) return source.render_reason ?? 'Nothing to display'
   return 'Select source and run the pipeline'
 }
@@ -113,12 +114,16 @@ function useElementSize(ref: RefObject<HTMLElement | null>) {
 export function Viewport3D({
   source,
   volume,
+  plane = null,
   results,
   busy,
   uploading = false,
 }: {
   source: SourceSummary | null
   volume: VolumePayload | null
+  /** The selected image, when the source is a set of flat images rather than a
+   *  stack. Drawn as the plane it is, with its own size and orientation. */
+  plane?: ScenePlane | null
   results: ResultView[]
   busy: boolean
   /** Whether a new source is being sent. Its own flag and not `busy`: a job
@@ -168,9 +173,10 @@ export function Viewport3D({
 
     return {
       volume: volume ? { headerRef: volume.header_ref, binRef: volume.bin_ref } : null,
+      plane,
       surfaces,
     }
-  }, [volume, results])
+  }, [volume, plane, results])
 
   // A selection outlives the geometry it points at: the result can be deleted,
   // hidden, or replaced by a re-run, and the popup would be left naming a
@@ -184,7 +190,7 @@ export function Viewport3D({
   }, [model])
 
   const latest = [...results].reverse().find((r) => r.job.result)?.job.result ?? null
-  const hasContent = model.volume !== null || model.surfaces.length > 0
+  const hasContent = model.volume !== null || model.plane !== null || model.surfaces.length > 0
 
   return (
     <div className="view-pane" ref={viewportRef}>

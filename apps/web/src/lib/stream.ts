@@ -46,6 +46,12 @@ const RETRY_MS = 4000
 let socket: WebSocket | null = null
 let live = false
 let retry: number | null = null
+
+/** The topic set the socket was last asked to carry, sorted. */
+let subscribed: string | null = null
+
+/** A coalescing timer for topic-set changes. */
+let pending: number | null = null
 /** Job ids the page is following. The socket is restarted when this changes. */
 const watched = new Set<string>()
 const awaitingSettle = new Map<string, Set<() => void>>()
@@ -177,6 +183,20 @@ function open(): void {
 }
 
 /**
+ * Close a socket deliberately: clear `onclose` so it is not retried, and use 1000
+ * so the dev proxy does not log `write ECONNABORTED` for a socket we dropped.
+ */
+function shut(target: WebSocket | null): void {
+  if (!target) return
+  target.onclose = null
+  try {
+    target.close(1000)
+  } catch {
+    // Already closing, or never opened. Nothing to do either way.
+  }
+}
+
+/**
  * Restart the socket with the current topic set.
  *
  * A reconnect rather than a subscribe message, because the topic set is fixed
@@ -188,32 +208,50 @@ function restart(): void {
   const previous = socket
   socket = null
   live = false
-  if (previous) {
-    previous.onclose = null
-    previous.close()
-  }
+  shut(previous)
   open()
+}
+
+function signature(): string {
+  return [...watched].sort().join(',')
+}
+
+/**
+ * Bring the socket in line with `watched`, once per batch. Deferred so a render
+ * that watches several topics reconnects once, and compared so a no-op change
+ * does not tear down a good connection.
+ */
+function sync(): void {
+  if (pending !== null) return
+  pending = window.setTimeout(() => {
+    pending = null
+    const wanted = signature()
+
+    if (watched.size === 0) {
+      if (socket !== null || subscribed !== null) {
+        subscribed = null
+        const previous = socket
+        socket = null
+        live = false
+        shut(previous)
+      }
+      return
+    }
+
+    if (wanted === subscribed && socket !== null) return
+    subscribed = wanted
+    restart()
+  }, 0)
 }
 
 /** Follow a topic. Returns the function that stops following it. */
 export function watchTopic(topic: string): () => void {
   watched.add(topic)
-  if (socket) restart()
-  else open()
+  sync()
 
   return () => {
     watched.delete(topic)
-    if (watched.size === 0) {
-      const previous = socket
-      socket = null
-      live = false
-      if (previous) {
-        previous.onclose = null
-        previous.close()
-      }
-    } else {
-      restart()
-    }
+    sync()
   }
 }
 

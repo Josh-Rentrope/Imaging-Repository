@@ -51,6 +51,8 @@ export interface ViewportSettings {
    * larger means it thins out. VTK's own default is 1.0.
    */
   opacityUnitDistance: number
+  /** Show the image at each cut, so an opened volume has a face, not a hollow. */
+  showSlice: boolean
   planes: Record<Axis, PlaneSettings>
 }
 
@@ -82,6 +84,7 @@ export const DEFAULT_SETTINGS: ViewportSettings = {
   densityUnit: 'fraction',
   cutAboveHigh: true,
   opacityUnitDistance: 1,
+  showSlice: true,
   planes: {
     x: { enabled: false, showPlane: true, position: 0.5, flip: false },
     y: { enabled: false, showPlane: true, position: 0.5, flip: false },
@@ -147,8 +150,86 @@ export function fractionToValue(fraction: number, range: [number, number]): numb
   return range[0] + (range[1] - range[0]) * fraction
 }
 
+/** How close to a voxel axis a normal must be to count as running along it. */
+const AXIS_ALIGNED_TOLERANCE = 0.999
+
+/** Is a cut on this world axis also one along the volume's own axes?
+
+ *  The direction matrix is orthonormal, so the world axis in index space is just
+ *  the matching row; one ±1 component means they agree. Sign does not matter. */
+export function cutIsInferred(direction: number[] | null, axisIndex: number): boolean {
+  if (!direction || direction.length < 9) return false
+  const inIndexSpace = [0, 1, 2].map((row) => direction[row * 3 + axisIndex])
+  return !inIndexSpace.some((value) => Math.abs(value) >= AXIS_ALIGNED_TOLERANCE)
+}
+
 export function valueToFraction(value: number, range: [number, number]): number {
   const span = range[1] - range[0]
   if (!span) return 0
   return Math.min(1, Math.max(0, (value - range[0]) / span))
+}
+
+/** One sample of the opacity curve, as a fraction of the value range. */
+export interface RampPoint {
+  fraction: number
+  opacity: number
+}
+
+/** Opacity at the centre of a filter; higher than the old ramp's peak because a
+ *  bump is low at both ends, not one. */
+const FILTER_PEAK = 0.9
+
+/** How opaque the space above the filter is when the cutoff is off. */
+const ABOVE_FILTER_PEAK = 0.35
+
+/** How much of the range a window must leave out to count as a filter. The dead
+ *  zone stops a stray drag off zero from emptying the viewport. */
+const FILTER_INSET = 0.01
+
+/** Is this window a filter rather than "show everything"? Shared with the peak
+ *  readout so it cannot describe a shape that is not on screen. */
+export function isDensityFilter(density: [number, number]): boolean {
+  const [low, high] = density
+  return low > FILTER_INSET || high < 1 - FILTER_INSET
+}
+
+/** Samples across a filter; odd, so one lands exactly on the centre. */
+const FILTER_SAMPLES = 13
+
+/** Opacity for a density window, as fractions of the range. The whole range is a
+ *  top-weighted ramp; anything narrower peaks at its centre, not its top edge. */
+export function densityRamp(
+  density: [number, number],
+  cutAboveHigh: boolean,
+): RampPoint[] {
+  const [low, high] = density
+
+  if (!isDensityFilter(density)) {
+    return [
+      { fraction: 0, opacity: 0 },
+      { fraction: 0.35, opacity: 0.01 },
+      { fraction: 0.6, opacity: 0.05 },
+      { fraction: 0.85, opacity: 0.32 },
+      { fraction: 1, opacity: 0.8 },
+    ]
+  }
+
+  const centre = (low + high) / 2
+  const half = (high - low) / 2
+  const points: RampPoint[] = []
+  for (let index = 0; index < FILTER_SAMPLES; index += 1) {
+    const t = (index / (FILTER_SAMPLES - 1)) * 2 - 1 // -1 .. 1 across the filter
+    // (1 - t^2)^2: flat at the centre and at each edge, so the taper has no crease.
+    const profile = (1 - t * t) ** 2
+    points.push({ fraction: centre + half * t, opacity: FILTER_PEAK * profile })
+  }
+
+  if (!cutAboveHigh && high < 1) {
+    const room = 1 - high
+    points.push({ fraction: high + room * 0.35, opacity: ABOVE_FILTER_PEAK * 0.5 })
+    points.push({ fraction: high + room * 0.75, opacity: ABOVE_FILTER_PEAK * 0.85 })
+    points.push({ fraction: 1, opacity: ABOVE_FILTER_PEAK })
+  }
+
+  return points
 }

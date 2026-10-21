@@ -15,11 +15,15 @@ import { Corners } from '@kitware/vtk.js/Interaction/Widgets/OrientationMarkerWi
 import vtkActor from '@kitware/vtk.js/Rendering/Core/Actor'
 import vtkAxesActor from '@kitware/vtk.js/Rendering/Core/AxesActor'
 import vtkColorTransferFunction from '@kitware/vtk.js/Rendering/Core/ColorTransferFunction'
+import vtkImageResliceMapper from '@kitware/vtk.js/Rendering/Core/ImageResliceMapper'
+import vtkImageSlice from '@kitware/vtk.js/Rendering/Core/ImageSlice'
 import vtkMapper from '@kitware/vtk.js/Rendering/Core/Mapper'
 import vtkVolume from '@kitware/vtk.js/Rendering/Core/Volume'
 import vtkVolumeMapper from '@kitware/vtk.js/Rendering/Core/VolumeMapper'
 import vtkPLYReader from '@kitware/vtk.js/IO/Geometry/PLYReader'
 import vtkSTLReader from '@kitware/vtk.js/IO/Geometry/STLReader'
+import vtkRenderer from '@kitware/vtk.js/Rendering/Core/Renderer'
+import vtkTexture from '@kitware/vtk.js/Rendering/Core/Texture'
 import vtkGenericRenderWindow from '@kitware/vtk.js/Rendering/Misc/GenericRenderWindow'
 
 import { Spinner } from '../components/Spinner'
@@ -29,6 +33,8 @@ import { intersectBox, intersectMesh, type Ray, type Visibility } from './raycas
 import {
   AXIS_COLORS,
   backgroundHex,
+  cutIsInferred,
+  densityRamp,
   hexToRgb01,
   type Axis,
   type ViewportSettings,
@@ -59,10 +65,38 @@ export interface SceneSurface {
   labelsHeaderRef: string | null
 }
 
+/** A flat acquisition, drawn as the plane it is rather than as a volume. */
+export interface ScenePlane {
+  /** The windowed PNG the texture is built from. */
+  url: string
+  rows: number
+  columns: number
+  /** Millimetres per pixel as [x, y], or null when the file declares none. */
+  spacing: [number, number] | null
+  origin: [number, number, number]
+  /** The image's own x, y and normal axes, concatenated, as the volume's are. */
+  direction: number[]
+  /** Changes when the image or its window changes, so the texture is rebuilt. */
+  key: string
+}
+
 export interface SceneModel {
   volume: SceneVolume | null
+  plane: ScenePlane | null
   surfaces: SceneSurface[]
 }
+
+interface PlaneEntry {
+  source: ReturnType<typeof vtkPlaneSource.newInstance>
+  mapper: ReturnType<typeof vtkMapper.newInstance>
+  actor: ReturnType<typeof vtkActor.newInstance>
+  texture: ReturnType<typeof vtkTexture.newInstance>
+  /** Revoked on teardown: an object URL pins its blob until it is. */
+  objectUrl: string | null
+}
+
+/** vtk.js instances all have `delete()`; `vtkTexture`'s type just omits it. */
+type Deletable = { delete(): void }
 
 /** What a click on labelled geometry resolved to. */
 export interface SceneSelection {
@@ -109,6 +143,14 @@ interface PlaneVisual {
   actor: ReturnType<typeof vtkActor.newInstance>
 }
 
+/** The image in a cut face: a reslice bound to the same plane the volume is clipped by. */
+interface SliceEntry {
+  mapper: ReturnType<typeof vtkImageResliceMapper.newInstance>
+  actor: ReturnType<typeof vtkImageSlice.newInstance>
+  /** Whether this axis's cut is oblique to the volume's own axes. */
+  inferred: boolean
+}
+
 interface SurfaceEntry {
   actor: ReturnType<typeof vtkActor.newInstance>
   mapper: ReturnType<typeof vtkMapper.newInstance>
@@ -128,13 +170,20 @@ interface SurfaceEntry {
 interface Ctx {
   generic: ReturnType<typeof vtkGenericRenderWindow.newInstance>
   renderer: ReturnType<ReturnType<typeof vtkGenericRenderWindow.newInstance>['getRenderer']>
+  /** The layer the cut planes and their slices are drawn on, above the volume. */
+  overlay: ReturnType<typeof vtkRenderer.newInstance>
   renderWindow: ReturnType<ReturnType<typeof vtkGenericRenderWindow.newInstance>['getRenderWindow']>
   volumeMapper: ClippableMapper | null
   volume: ReturnType<typeof vtkVolume.newInstance> | null
+  /** The flat-image actor, when the source is a plane rather than a stack. */
+  plane: PlaneEntry | null
   range: [number, number]
   bounds: Bounds
+  /** The volume's direction cosines, for deciding whether a cut is a real slice. */
+  direction: number[] | null
   planes: Record<Axis, ReturnType<typeof vtkPlane.newInstance>>
   visuals: Record<Axis, PlaneVisual>
+  slice: Record<Axis, SliceEntry>
   surfaces: Map<string, SurfaceEntry>
   marker: ReturnType<typeof vtkOrientationMarkerWidget.newInstance> | null
   axes: ReturnType<typeof vtkAxesActor.newInstance> | null
@@ -154,6 +203,9 @@ const CLICK_SLOP_PX = 4
 
 /** Labels other than the selected one, so a pick reads as one structure. */
 const DIMMED: [number, number, number] = [104, 112, 122]
+
+/** Cut-face opacity: enough to read, little enough to see into the volume behind. */
+const SLICE_OPACITY = 0.62
 
 async function fetchBytes(ref: string): Promise<ArrayBuffer> {
   const response = await fetchArtifact(artifactUrl(ref))
@@ -205,12 +257,8 @@ async function loadVertexLabels(
   }
 }
 
-/**
- * Colour and opacity ramps over the selected density window.
- *
- * Anchored on the user's thresholds rather than the raw data range, so raising
- * the low threshold is what removes soft tissue and leaves bone standing.
- */
+/** Colour ramps across the window; opacity comes from `densityRamp`, which peaks
+ *  at the centre of a filter rather than at its top edge. */
 function buildTransferFunctions(
   range: [number, number],
   density: [number, number],
@@ -230,21 +278,10 @@ function buildTransferFunctions(
   colour.addRGBPoint(at(0.75), 0.93, 0.91, 0.86)
   colour.addRGBPoint(hi, 1, 1, 1)
 
-  // Weighted towards the top of the window. A ramp that rises early makes soft
-  // tissue saturate the ray before it ever reaches bone, which reads as a solid
-  // block. Pair this with the opacity unit distance when tuning.
+  // The function clamps past its last point, so zero at both ends hides the rest.
   const opacity = vtkPiecewiseFunction.newInstance()
-  opacity.addPoint(lo, 0)
-  opacity.addPoint(at(0.35), 0.01)
-  opacity.addPoint(at(0.6), 0.05)
-  opacity.addPoint(at(0.85), 0.32)
-  opacity.addPoint(hi, 0.8)
-
-  if (cutAboveHigh) {
-    // Close the window off again. A piecewise function clamps beyond its last
-    // point, so without this everything denser than `hi` keeps the peak opacity
-    // and enamel, restorations and metal sit in front of the bone.
-    opacity.addPoint(hi + width * 0.001, 0)
+  for (const point of densityRamp(density, cutAboveHigh)) {
+    opacity.addPoint(min + span * point.fraction, point.opacity)
   }
 
   return { colour, opacity, low: lo, high: hi }
@@ -281,6 +318,107 @@ function createPlaneVisuals(renderer: Ctx['renderer']): Record<Axis, PlaneVisual
   }
 
   return visuals
+}
+
+/**
+ * Cut planes get their own layer: the depth pass skips a renderer with no volume,
+ * so they no longer write the depth that terminates the volume's rays.
+ */
+function createCutRenderer(
+  generic: ReturnType<typeof vtkGenericRenderWindow.newInstance>,
+  renderer: Ctx['renderer'],
+): Ctx['overlay'] {
+  const overlay = vtkRenderer.newInstance()
+  // Also sets preserveColorBuffer, so this layer does not erase the one below.
+  overlay.setLayer(1)
+  overlay.setActiveCamera(renderer.getActiveCamera())
+  const renderWindow = generic.getRenderWindow()
+  renderWindow.addRenderer(overlay)
+  renderWindow.setNumberOfLayers(2)
+  return overlay
+}
+
+/** One reslice actor per axis. Not clippable: it would clip itself away. */
+function createSliceActors(renderer: Ctx['renderer']): Record<Axis, SliceEntry> {
+  const slice = {} as Record<Axis, SliceEntry>
+
+  for (const axis of AXES) {
+    const mapper = vtkImageResliceMapper.newInstance()
+    const actor = vtkImageSlice.newInstance()
+    actor.setMapper(mapper)
+    actor.setVisibility(false)
+
+    const property = actor.getProperty()
+    property.setOpacity(SLICE_OPACITY)
+    property.setInterpolationTypeToLinear()
+
+    renderer.addActor(actor)
+    slice[axis] = { mapper, actor, inferred: false }
+  }
+
+  return slice
+}
+
+const NO_INFERRED: Record<Axis, boolean> = { x: false, y: false, z: false }
+
+/** What an interactor subscription has to support so it can be torn down. */
+interface Subscription {
+  unsubscribe(): void
+}
+
+/** Camera-move subscription for the cut labels. Guarded: decoration must never
+ *  take the viewport down, and vtk declares events it does not create. */
+function labelSubscriptions(interactor: object, onCameraMoved: () => void): Subscription[] {
+  const found: Subscription[] = []
+  // `RenderEvent` fires on every render; the animation events need an explicit loop.
+  for (const name of ['onRenderEvent'] as const) {
+    const on = (interactor as Record<string, unknown>)[name]
+    if (typeof on !== 'function') continue
+    const subscription = (on as (cb: () => void) => Subscription).call(
+      interactor,
+      onCameraMoved,
+    )
+    if (subscription) found.push(subscription)
+  }
+  return found
+}
+
+/** Which of the enabled cuts are resamples of the volume, per axis. */
+function axesInferred(ctx: Ctx): Record<Axis, boolean> {
+  const inferred = { ...NO_INFERRED }
+  for (const axis of AXES) {
+    inferred[axis] = ctx.slice[axis].inferred && ctx.slice[axis].actor.getVisibility()
+  }
+  return inferred
+}
+
+/** Put each label at the projected centre of its cut. `worldToDisplay` measures y
+ *  upwards in canvas pixels, so the flip to CSS coordinates happens here. */
+function placeSliceLabels(ctx: Ctx, refs: Partial<Record<Axis, HTMLDivElement | null>>) {
+  const view = ctx.renderWindow.getViews()[0] as
+    | { worldToDisplay?: (x: number, y: number, z: number, r: unknown) => number[] }
+    | undefined
+  const canvas = canvasOf(ctx.generic)
+  if (!view?.worldToDisplay || !canvas) return
+
+  const rect = canvas.getBoundingClientRect()
+  const scaleX = rect.width ? canvas.width / rect.width : 1
+  const scaleY = rect.height ? canvas.height / rect.height : 1
+
+  for (const axis of AXES) {
+    const node = refs[axis]
+    if (!node) continue
+    const origin = ctx.planes[axis].getOrigin()
+    const display = view.worldToDisplay(origin[0], origin[1], origin[2], ctx.renderer)
+    if (!display || !Number.isFinite(display[0]) || !Number.isFinite(display[1])) {
+      node.style.visibility = 'hidden'
+      continue
+    }
+    const x = display[0] / scaleX
+    const y = rect.height - display[1] / scaleY
+    node.style.visibility = 'visible'
+    node.style.transform = `translate(${Math.round(x + 10)}px, ${Math.round(y + 10)}px)`
+  }
 }
 
 function canvasOf(
@@ -576,6 +714,12 @@ function applyPlanes(ctx: Ctx, settings: ViewportSettings) {
     ctx.planes[axis].setNormal(normal)
     ctx.planes[axis].setOrigin(origin)
 
+    // Bound to the same plane the volume is clipped by, so it cannot drift.
+    const slice = ctx.slice[axis]
+    slice.mapper.setSlicePlane(ctx.planes[axis])
+    slice.inferred = cutIsInferred(ctx.direction, i)
+    slice.actor.setVisibility(Boolean(config.enabled && settings.showSlice && ctx.volume))
+
     // Quad spanning the other two axes, lifted a hair into the kept half so it
     // does not z-fight with the clipped surface. `showPlane` hides the graphic
     // without disarming the cut.
@@ -629,11 +773,23 @@ export function Scene({
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [revision, setRevision] = useState(0)
+  /** Which cuts are reconstructions rather than slices of the data. */
+  const [inferred, setInferred] = useState<Record<Axis, boolean>>(NO_INFERRED)
+  // Moved directly rather than through state: a render per frame is not worth it.
+  const labelRefs = useRef<Partial<Record<Axis, HTMLDivElement | null>>>({})
 
   // The pick handlers are bound to the interactor once, at mount, so they
   // cannot close over props that change every render.
   const onSelectRef = useRef(onSelect)
   onSelectRef.current = onSelect
+
+  // Bound once at mount, so the subscription reads the current one through a ref.
+  const positionLabels = () => {
+    const ctx = ctxRef.current
+    if (ctx) placeSliceLabels(ctx, labelRefs.current)
+  }
+  const positionLabelsRef = useRef(positionLabels)
+  positionLabelsRef.current = positionLabels
   // Read for each surface's clip flag, so a click ignores geometry the cutting
   // planes have taken off the screen.
   const modelRef = useRef(model)
@@ -641,6 +797,8 @@ export function Scene({
 
   const volumeKey = model.volume ? `${model.volume.headerRef}|${model.volume.binRef}` : ''
   const surfaceKey = model.surfaces.map((s) => `${s.id}:${s.meshRef}`).join(',')
+  // Carries the image and its window, so either change rebuilds the texture.
+  const planeKey = model.plane?.key ?? ''
 
   // ── render window: created once, content managed below ───────────────────
   useEffect(() => {
@@ -654,16 +812,31 @@ export function Scene({
     const renderer = generic.getRenderer()
     const renderWindow = generic.getRenderWindow()
 
+    // Falls back to the main renderer: cut planes clip the volume again, but a
+    // viewport that draws beats a blank one.
+    let overlay = renderer
+    let ownOverlay = false
+    try {
+      overlay = createCutRenderer(generic, renderer)
+      ownOverlay = true
+    } catch (cause) {
+      console.warn('[scene] cut planes will share the volume renderer:', cause)
+    }
+
     ctxRef.current = {
       generic,
       renderer,
+      overlay,
       renderWindow,
       volumeMapper: null,
       volume: null,
+      plane: null,
       range: [0, 1],
       bounds: [0, 1, 0, 1, 0, 1],
+      direction: null,
       planes: { x: vtkPlane.newInstance(), y: vtkPlane.newInstance(), z: vtkPlane.newInstance() },
-      visuals: createPlaneVisuals(renderer),
+      visuals: createPlaneVisuals(overlay),
+      slice: createSliceActors(overlay),
       surfaces: new Map(),
       marker: null,
       axes: null,
@@ -694,6 +867,8 @@ export function Scene({
     const subscriptions = [
       interactor.onLeftButtonPress(onPress),
       interactor.onLeftButtonRelease(onRelease),
+      // Labels are anchored in world space, so they re-project as the camera moves.
+      ...labelSubscriptions(interactor, () => positionLabelsRef.current()),
     ]
 
     const observer = new ResizeObserver(() => {
@@ -708,6 +883,13 @@ export function Scene({
       observer.disconnect()
       for (const subscription of subscriptions) subscription.unsubscribe()
       ctxRef.current?.marker?.setEnabled(false)
+      if (ctxRef.current?.plane?.objectUrl) {
+        URL.revokeObjectURL(ctxRef.current.plane.objectUrl)
+      }
+      if (ownOverlay) {
+        renderWindow.removeRenderer(overlay)
+        overlay.delete()
+      }
       generic.delete()
       ctxRef.current = null
     }
@@ -724,6 +906,13 @@ export function Scene({
       ctx.volume = null
       ctx.volumeMapper = null
     }
+    for (const axis of AXES) {
+      // Detached, or the mapper holds image data that is about to be deleted.
+      ctx.slice[axis].mapper.setInputData(null)
+      ctx.slice[axis].actor.setVisibility(false)
+      ctx.slice[axis].inferred = false
+    }
+    ctx.direction = null
     if (!model.volume) {
       // Moving to a dataset with no volume. The frame has to be given up here,
       // or the surfaces that arrive next are drawn into the *previous* study's
@@ -774,11 +963,17 @@ export function Scene({
       const volume = vtkVolume.newInstance()
       volume.setMapper(mapper)
 
+      // The cut faces slice the same data the volume is drawn from.
+      for (const axis of AXES) {
+        ctx.slice[axis].mapper.setInputData(imageData)
+      }
+
       ctx.renderer.addVolume(volume)
       ctx.volumeMapper = mapper as unknown as ClippableMapper
       ctx.volume = volume
       ctx.range = header.value_range
       ctx.bounds = mapper.getBounds() as Bounds
+      ctx.direction = header.direction
       ctx.framed = false
       setStatus(null)
       setRevision((value) => value + 1)
@@ -792,6 +987,123 @@ export function Scene({
       cancelled = true
     }
   }, [volumeKey])
+
+  // ── flat image ───────────────────────────────────────────────────────────
+  useEffect(() => {
+    const ctx = ctxRef.current
+    if (!ctx) return
+
+    const clear = () => {
+      if (!ctx.plane) return
+      ctx.plane.actor.removeTexture(ctx.plane.texture)
+      ctx.renderer.removeActor(ctx.plane.actor)
+      ctx.plane.actor.delete()
+      ctx.plane.mapper.delete()
+      ctx.plane.source.delete()
+      ;(ctx.plane.texture as unknown as Deletable).delete()
+      // Revoked here or stepping through frames pins every blob.
+      if (ctx.plane.objectUrl) URL.revokeObjectURL(ctx.plane.objectUrl)
+      ctx.plane = null
+    }
+
+    clear()
+    if (!model.plane) return
+
+    let cancelled = false
+    setStatus('Loading image…')
+
+    const load = async () => {
+      const plane = model.plane!
+      const response = await fetchArtifact(plane.url)
+      if (!response.ok) throw new Error(`the image could not be read (${response.status})`)
+      const blob = await response.blob()
+      if (cancelled) return
+
+      // A blob URL, because <img crossorigin> cannot carry the viewer cookie.
+      const objectUrl = URL.createObjectURL(blob)
+      const image = new Image()
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve()
+        image.onerror = () => reject(new Error('the image could not be decoded'))
+        image.src = objectUrl
+      })
+      if (cancelled) {
+        URL.revokeObjectURL(objectUrl)
+        return
+      }
+
+      // No spacing means an unknown scale, so one unit per pixel is a placeholder.
+      const [sx, sy] = plane.spacing ?? [1, 1]
+      const rowCosine = plane.direction.slice(0, 3)
+      const colCosine = plane.direction.slice(3, 6)
+      const corner = (
+        alongColumns: number,
+        alongRows: number,
+      ): [number, number, number] => [
+        plane.origin[0] + alongColumns * rowCosine[0] + alongRows * colCosine[0],
+        plane.origin[1] + alongColumns * rowCosine[1] + alongRows * colCosine[1],
+        plane.origin[2] + alongColumns * rowCosine[2] + alongRows * colCosine[2],
+      ]
+
+      const source = vtkPlaneSource.newInstance()
+      source.setXResolution(1)
+      source.setYResolution(1)
+      source.setOrigin(...plane.origin)
+      // u runs along columns and v along rows; the server's flip makes v=0 row 0.
+      source.setPoint1(...corner(plane.columns * sx, 0))
+      source.setPoint2(...corner(0, plane.rows * sy))
+
+      const texture = vtkTexture.newInstance()
+      texture.setInterpolate(true)
+      texture.setImage(image)
+
+      const mapper = vtkMapper.newInstance()
+      mapper.setInputConnection(source.getOutputPort())
+
+      const actor = vtkActor.newInstance()
+      actor.setMapper(mapper)
+      actor.addTexture(texture)
+      const property = actor.getProperty()
+      // Unlit: the pixels already carry their contrast.
+      property.setLighting(false)
+      // Opaque: it is the only thing drawn for a plane source.
+      property.setOpacity(1)
+
+      ctx.renderer.addActor(actor)
+      ctx.plane = { source, mapper, actor, texture, objectUrl }
+
+      // Four corners; a plane has no volume to ask for bounds.
+      const corners = [
+        corner(0, 0),
+        corner(plane.columns * sx, 0),
+        corner(0, plane.rows * sy),
+        corner(plane.columns * sx, plane.rows * sy),
+      ]
+      const axis = [0, 1, 2].map((i) => {
+        const values = corners.map((point) => point[i])
+        return [Math.min(...values), Math.max(...values)]
+      })
+      ctx.bounds = [
+        axis[0][0], axis[0][1],
+        axis[1][0], axis[1][1],
+        axis[2][0], axis[2][1],
+      ] as Bounds
+      ctx.framed = false
+      setStatus(null)
+      setRevision((value) => value + 1)
+    }
+
+    load().catch((cause: unknown) => {
+      if (!cancelled) {
+        setError(cause instanceof Error ? cause.message : String(cause))
+        setStatus(null)
+      }
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [planeKey])
 
   // ── surfaces: reconcile actors against the requested list ────────────────
   useEffect(() => {
@@ -1051,6 +1363,12 @@ export function Scene({
     property.setAmbient(0.25)
     property.setDiffuse(0.75)
     property.setSpecular(0.15)
+
+    // Cut faces share the ramp, so tissue inside a cut matches the surface.
+    for (const axis of AXES) {
+      ctx.slice[axis].actor.getProperty().setRGBTransferFunction(0, colour)
+    }
+
     ctx.renderWindow.render()
   }, [settings.density, settings.cutAboveHigh, settings.opacityUnitDistance, revision])
 
@@ -1064,15 +1382,38 @@ export function Scene({
       ;(entry.mapper as unknown as ClippableMapper).modified()
     }
     ctx.volumeMapper?.modified()
+    // The reslice rebuilds from the plane's mtime, so a moved plane must say so.
+    for (const axis of AXES) ctx.slice[axis].mapper.modified()
+    // Compared, not replaced: a new object would re-render on every dragged plane.
+    const next = axesInferred(ctx)
+    setInferred((current) =>
+      AXES.every((axis) => current[axis] === next[axis]) ? current : next,
+    )
+    positionLabels()
     ctx.renderWindow.render()
     // Depends on `model`, not on `surfaceKey`: the key identifies which meshes
     // are loaded, and toggling a result's clip flag changes none of it, so
     // keying on it would leave the planes on a surface just exempted.
-  }, [settings.planes, model, revision])
+  }, [settings.planes, settings.showSlice, model, revision])
 
   return (
     <div style={{ position: 'absolute', inset: 0 }}>
       <div className="scene-host" ref={containerRef} />
+      {/* One label per cut that is a resample rather than a real slice. */}
+      {AXES.map((axis) =>
+        inferred[axis] ? (
+          <div
+            key={axis}
+            className={`slice-label slice-label-${axis}`}
+            ref={(node) => {
+              labelRefs.current[axis] = node
+            }}
+            title="This cut is not perpendicular to the scan's own axes, so the image is interpolated between slices rather than being one of them."
+          >
+            inferred
+          </div>
+        ) : null,
+      )}
       {error && <div className="empty-state error-text">{error}</div>}
       {!error && status && (
         // A spinner rather than the words alone. There is no total to count
