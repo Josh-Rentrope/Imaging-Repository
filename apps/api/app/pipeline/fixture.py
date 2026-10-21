@@ -312,6 +312,15 @@ def _segment_volume(envelope: dict, params: dict, context: dict, sources, record
     storage: Storage = context["storage"]
     classes = params.get("classes") or None
 
+    # Refused by name: handed a projection it would fail, or label a time axis as
+    # anatomy. `px2tooth` and `detect_caries` take flat images and are not gated.
+    if getattr(record, "presentation", "volume") != "volume":
+        raise SurfaceError(
+            f"this source is not a stack of slices, so there is nothing to segment: "
+            f"{record.render_reason or 'it has no third axis'}. "
+            "Run a projection op such as px2tooth, or import a CT or MR series."
+        )
+
     # Read off the ambient context rather than the request: a job runs on its own
     # thread and the worker is what set it. Absent when nothing is watching,
     # which is the normal case for the tests.
@@ -707,6 +716,12 @@ def _iso_surface_threshold(envelope: dict, params: dict, context: dict) -> None:
 
     payload = sources.volume_payload(record)
     if payload is None:
+        # A plane's reason describes what it is, not what failed.
+        if getattr(record, "presentation", "volume") == "plane":
+            raise SurfaceError(
+                f"this source is a set of flat images, not a volume to threshold: "
+                f"{record.render_reason}. A surface needs a third axis to close over."
+            )
         raise SurfaceError(record.render_reason or "this source has no volume to extract from")
 
     threshold = float(params.get("threshold", 300))

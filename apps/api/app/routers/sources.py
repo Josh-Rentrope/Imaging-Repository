@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from fastapi.responses import Response
 
 from ..deps import get_source_store
+from ..dicom.volume import read_plane
 from ..ingest import stage_uploads
 from ..sources import (
     SourceRecord,
@@ -94,6 +95,21 @@ def rename_source(
     return to_summary(store.save(record))
 
 
+@router.post("/{source_id}/reanalyse", response_model=SourceSummary)
+def reanalyse_source(
+    source_id: str, store: Annotated[SourceStore, Depends(get_source_store)]
+) -> SourceSummary:
+    """Re-run the analysis for one source, reading the files already stored.
+
+    Reads already do this for stale records; the explicit route is for when a rule
+    was retuned rather than the version bumped.
+    """
+    record = store.get(source_id)
+    if record is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no source {source_id!r}")
+    return to_summary(store.reanalyse(record))
+
+
 @router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_source(source_id: str, store: Annotated[SourceStore, Depends(get_source_store)]) -> None:
     if not store.delete(source_id):
@@ -135,6 +151,19 @@ def list_images(
     if record is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no source {source_id!r}")
 
+    if record.kind == "dicom" and record.presentation == "plane":
+        # Each entry carries its own geometry; a set of projections shares none.
+        images = store.plane_images(record)
+        return {
+            "source_id": source_id,
+            "kind": "dicom",
+            "axis": "plane",
+            "presentation": "plane",
+            "count": len(images),
+            "note": record.render_reason,
+            "images": images,
+        }
+
     if record.kind == "dicom":
         volume = store.volume_payload(record)
         meta = record.volume_meta or {}
@@ -148,6 +177,7 @@ def list_images(
             "source_id": source_id,
             "kind": "dicom",
             "axis": "axial",
+            "presentation": "volume",
             "count": int(dims[2]),
             "window": {
                 "center": meta.get("window_center"),
@@ -220,6 +250,22 @@ def get_image(
             headers={"Cache-Control": "private, max-age=3600"},
         )
 
+    if record.presentation == "plane":
+        # Straight out of the file that holds it; these were never slices.
+        located = store.plane_at(record, index)
+        if located is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail=f"no image {index}")
+        data, frame = located
+        read = read_plane(data, frame)
+        if read is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"image {index} could not be decoded",
+            )
+        pixels, geometry = read
+        centre, width = _window(geometry, pixels, level, window)
+        return _png(_apply_window(pixels, centre, width))
+
     payload = store.volume_payload(record)
     header = payload.header if payload else {}
     dims = [int(v) for v in header.get("dims", [])]
@@ -242,45 +288,48 @@ def get_image(
         count=nx * ny,
     ).reshape(ny, nx)
 
-    centre, width = _window(record, plane, level, window)
-    low = centre - width / 2
-    span = width if width else 1.0
-    scaled = np.clip((plane - low) / span, 0.0, 1.0)
-
-    from PIL import Image
-
-    buffer = io.BytesIO()
-    # Flipped vertically: an axial slice's first row is the patient's posterior
-    # in DICOM's convention, and an image is drawn top-down.
-    Image.fromarray((scaled[::-1] * 255).astype(np.uint8), mode="L").save(
-        buffer, format="PNG", optimize=True
-    )
-    return Response(
-        content=buffer.getvalue(),
-        media_type="image/png",
-        headers={
-            "Cache-Control": "private, max-age=3600",
-            # Already post-stride: the stored spacing is the spacing of the
-            # volume as stored, so multiplying by stride again reports slices as
-            # twice as far apart as they are.
-            "X-Slice-Spacing-MM": str(header.get("spacing", [0, 0, 0])[2]),
-        },
+    centre, width = _window(record.volume_meta or {}, plane, level, window)
+    # Already post-stride: multiplying by stride again would double the spacing.
+    return _png(
+        _apply_window(plane, centre, width),
+        slice_spacing=header.get("spacing", [0, 0, 0])[2],
     )
 
 
-def _window(record, plane: np.ndarray, level: float | None, width: float | None) -> tuple[float, float]:
-    """Window centre and width, from the request, the series, or the slice."""
-    meta = record.volume_meta or {}
+def _window(
+    meta: dict, pixels: np.ndarray, level: float | None, width: float | None
+) -> tuple[float, float]:
+    """Window from the request, the image's header, or its own percentiles."""
     centre = level if level is not None else meta.get("window_center")
     span = width if width is not None else meta.get("window_width")
     if centre is not None and span:
         return float(centre), float(span)
 
-    low = float(np.percentile(plane, 1))
-    high = float(np.percentile(plane, 99))
+    low = float(np.percentile(pixels, 1))
+    high = float(np.percentile(pixels, 99))
     if high <= low:
         high = low + 1.0
     return (low + high) / 2, high - low
+
+
+def _apply_window(pixels: np.ndarray, centre: float, width: float) -> np.ndarray:
+    low = centre - width / 2
+    span = width if width else 1.0
+    return np.clip((pixels - low) / span, 0.0, 1.0)
+
+
+def _png(scaled: np.ndarray, slice_spacing: float | None = None) -> Response:
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    # Flipped: DICOM's first row is the bottom, and an image is drawn top-down.
+    Image.fromarray((scaled[::-1] * 255).astype(np.uint8), mode="L").save(
+        buffer, format="PNG", optimize=True
+    )
+    headers = {"Cache-Control": "private, max-age=3600"}
+    if slice_spacing is not None:
+        headers["X-Slice-Spacing-MM"] = str(slice_spacing)
+    return Response(content=buffer.getvalue(), media_type="image/png", headers=headers)
 
 
 @router.get("/{source_id}/volume", response_model=VolumePayload)

@@ -103,6 +103,10 @@ apps/api/vendor/*
 
 apps/api/.data
 
+# Archives downloaded by tools/sweep_samples.py: patient-derived, 541 MB, and
+# history keeps anything committed for ever. Same reasoning as models/.
+apps/api/.cache/
+
 # ── Local deploy state ───────────────────────────────────────────────────────
 # deploys.lock IS committed (it pins the model image digest).
 # Local overrides are not.

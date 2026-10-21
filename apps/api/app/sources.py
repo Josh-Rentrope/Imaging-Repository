@@ -19,6 +19,7 @@ the segmenter, and `materialize()` replaces it.
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 import uuid
 from collections.abc import Iterator, Sequence
@@ -31,11 +32,17 @@ from pydantic import BaseModel, Field
 
 from .dicom import parse_file
 from .dicom.volume import build as build_volume
-from .dicom.volume import serialise, serialise_json
+from .dicom.volume import plane_frames, plane_geometry, serialise, serialise_json
 from .storage import Storage
 
 MAX_FILES = 4000
 MAX_TOTAL_BYTES = 3 * 1024**3
+
+#: Bumped when the analysis changes what it concludes; older records are re-analysed
+#: on first read, so studies imported before a fix get it without being re-uploaded.
+ANALYSIS_VERSION = 2
+
+logger = logging.getLogger("bone_viewer.sources")
 
 
 class InstanceRecord(BaseModel):
@@ -64,6 +71,20 @@ class SourceRecord(BaseModel):
 
     renderable: bool = False
     render_reason: str | None = None
+    #: A stack, a set of flat images, or nothing drawable; only "none" is a failure.
+    presentation: Literal["volume", "plane", "none"] = "none"
+    #: Images in a "plane" source.
+    plane_count: int = 0
+    #: Tag the pixel spacing came from; None means the scale is unknown.
+    spacing_source: str | None = None
+    #: Slices discarded because their position was already occupied.
+    dropped_slices: int = 0
+    #: False when the series has positions but they are not one acquisition.
+    coherent: bool = True
+    #: The measurements behind that verdict.
+    coherence: dict[str, Any] | None = None
+    #: 0 means written before this field existed; see `ANALYSIS_VERSION`.
+    analysis_version: int = 0
     volume_header_ref: str | None = None
     volume_bin_ref: str | None = None
     volume_meta: dict[str, Any] | None = None
@@ -85,6 +106,12 @@ class SourceSummary(BaseModel):
     headerless: bool
     renderable: bool
     render_reason: str | None
+    presentation: Literal["volume", "plane", "none"]
+    plane_count: int
+    spacing_source: str | None
+    dropped_slices: int
+    coherent: bool
+    coherence: dict[str, Any] | None
 
 
 class VolumePayload(BaseModel):
@@ -108,6 +135,12 @@ def to_summary(record: SourceRecord) -> SourceSummary:
         headerless=record.headerless,
         renderable=record.renderable,
         render_reason=record.render_reason,
+        presentation=record.presentation,
+        plane_count=record.plane_count,
+        spacing_source=record.spacing_source,
+        dropped_slices=record.dropped_slices,
+        coherent=record.coherent,
+        coherence=record.coherence,
     )
 
 
@@ -134,7 +167,35 @@ class SourceStore:
     # -- reads --------------------------------------------------------------
 
     def get(self, source_id: str) -> SourceRecord | None:
-        return self._stored(self._index_key(source_id))
+        return self._refreshed(self._stored(self._index_key(source_id)))
+
+    def reanalyse(self, record: SourceRecord) -> SourceRecord:
+        """Re-run the analysis against the stored files, rebuilding the blob so the
+        geometry cannot disagree with a verdict that changed."""
+        if record.kind == "dicom":
+            payloads = [self.storage.get(instance.ref) for instance in record.instances]
+            self._attach_volume(record, payloads)
+        # Stamped even when not drawable: "not a volume" is an answer, and
+        # re-asking on every read would make a slow study a slow page for ever.
+        record.analysis_version = ANALYSIS_VERSION
+        return self.save(record)
+
+    def _refreshed(self, record: SourceRecord | None) -> SourceRecord | None:
+        """Re-analyse a record written by an older version. Reading therefore writes,
+        once per record, so studies nobody has opened since a fix still get it."""
+        if record is None or record.analysis_version >= ANALYSIS_VERSION:
+            return record
+        try:
+            return self.reanalyse(record)
+        except Exception:
+            # Logged, not swallowed: a record that always fails is retried on every
+            # load, and the only other symptom is that its verdict never changes.
+            logger.warning(
+                "could not re-analyse source %s; leaving it as it was",
+                record.source_id,
+                exc_info=True,
+            )
+            return record
 
     def list(
         self, workspace_id: str | None = None, set_id: str | None = None
@@ -149,6 +210,11 @@ class SourceStore:
                 # A record that will not parse is skipped rather than fatal: one
                 # bad write must not hide every other source.
                 continue
+            if record is None:
+                continue
+            # Before the filters, so a stale record is re-analysed once regardless
+            # of which view asks.
+            record = self._refreshed(record)
             if record is None:
                 continue
             if workspace_id is not None and record.workspace_id != workspace_id:
@@ -257,6 +323,7 @@ class SourceStore:
         record.bytes_total = sum(i.bytes for i in record.instances)
         record.instances.sort(key=lambda i: i.file_name)
         self._attach_volume(record, [path.read_bytes() for path, _ in entries])
+        record.analysis_version = ANALYSIS_VERSION
         return self.save(record)
 
     def create_images(
@@ -300,12 +367,25 @@ class SourceStore:
         record.instance_count = len(record.instances)
         record.bytes_total = sum(i.bytes for i in record.instances)
         record.instances.sort(key=lambda i: i.file_name)
+        # Stamped current so a re-read does not run a DICOM analysis over photos.
+        record.analysis_version = ANALYSIS_VERSION
         return self.save(record)
 
     def _attach_volume(self, record: SourceRecord, payloads: list[bytes]) -> None:
         result = build_volume(payloads)
+
+        # The shape comes from the assembler, not from whether a blob came out:
+        # a set of projections has no blob and is still drawable.
+        record.presentation = result.presentation
+        record.plane_count = result.planes
+        record.spacing_source = result.spacing_source
+        record.dropped_slices = result.dropped
+        record.coherent = result.coherent
+        record.coherence = result.coherence
+        record.renderable = result.presentation != "none"
+
         if result.volume is None:
-            record.renderable = False
+            # A refusal or a description of what the series is; shown as a tooltip.
             record.render_reason = result.reason
             return
 
@@ -326,7 +406,6 @@ class SourceStore:
             "window_width": volume.window_width,
             "stride": volume.stride,
         }
-        record.renderable = True
         record.render_reason = None
 
     def volume_payload(self, record: SourceRecord) -> VolumePayload | None:
@@ -338,6 +417,42 @@ class SourceStore:
             bin_ref=record.volume_bin_ref,
             header=json.loads(raw.decode("utf-8")),
         )
+
+    # -- flat images --------------------------------------------------------
+
+    def plane_images(self, record: SourceRecord) -> list[dict[str, Any]]:
+        """Every image in a plane source, with where it sits. Indexes span frames,
+        and the geometry is per file because projections need share nothing."""
+        images: list[dict[str, Any]] = []
+        for instance in record.instances:
+            data = self.storage.get(instance.ref)
+            frames = plane_frames(data)
+            geometry = plane_geometry(data) or {}
+            for frame in range(frames):
+                images.append(
+                    {
+                        "index": len(images),
+                        "name": instance.file_name
+                        if frames == 1
+                        else f"{instance.file_name} [{frame + 1}/{frames}]",
+                        "frame": frame,
+                        **geometry,
+                    }
+                )
+        return images
+
+    def plane_at(self, record: SourceRecord, index: int) -> tuple[bytes, int] | None:
+        """The file and frame an index names; stops early, so image 3 opens 4 files."""
+        if index < 0:
+            return None
+        remaining = index
+        for instance in record.instances:
+            data = self.storage.get(instance.ref)
+            frames = plane_frames(data)
+            if remaining < frames:
+                return data, remaining
+            remaining -= frames
+        return None
 
 
 def _describe(entries: list[tuple[Path, Any]]) -> str | None:

@@ -322,7 +322,14 @@ def test_volume_respects_slice_order_not_filename(client):
 
 def test_rescale_intercept_is_applied(client):
     series_uid = generate_uid()
-    source = upload_dicom(client, [("s.dcm", make_slice(0, series_uid, rows=2, cols=2))]).json()
+    # Two slices: a lone one is a plane and produces no volume to read.
+    source = upload_dicom(
+        client,
+        [
+            ("a.dcm", make_slice(0, series_uid, rows=2, cols=2)),
+            ("b.dcm", make_slice(1, series_uid, rows=2, cols=2)),
+        ],
+    ).json()
     volume = client.get(f"/sources/{source['source_id']}/volume").json()
 
     blob = client.get("/artifacts/" + volume["bin_ref"].split("://", 1)[1]).content
@@ -379,7 +386,10 @@ def test_rename_preserves_the_original_name(client):
 
 def test_delete_removes_the_source_and_its_files(client):
     series_uid = generate_uid()
-    source = upload_dicom(client, [("s.dcm", make_slice(0, series_uid))]).json()
+    source = upload_dicom(
+        client,
+        [("a.dcm", make_slice(0, series_uid)), ("b.dcm", make_slice(1, series_uid))],
+    ).json()
     source_id = source["source_id"]
 
     assert client.get(f"/sources/{source_id}/volume").status_code == 200
@@ -488,11 +498,8 @@ def test_iso_surface_without_a_source_fails_cleanly(client):
 
 
 def test_iso_surface_rejects_a_single_slice_source(client):
-    """A 1-voxel-thick volume has no interior to extract a surface from.
-
-    skimage's own error for this says nothing about slice counts, so the guard
-    has to name the real problem.
-    """
+    """A lone slice is now a plane, so the message names the source, not a voxel
+    count. The voxel guard behind it is covered by test_series_shape."""
     series_uid = generate_uid()
     source = upload_dicom(client, [("only.dcm", make_slice(0, series_uid, block=True))]).json()
     job = settle(client, client.post(
@@ -501,7 +508,8 @@ def test_iso_surface_rejects_a_single_slice_source(client):
               "capture": {"source_id": source["source_id"]}},
     ).json())
     assert job["status"] == "failed"
-    assert "at least 2 along every axis" in (job["error"] or "")
+    error = job["error"] or ""
+    assert "flat images" in error and "third axis" in error
 
 
 def test_iso_surface_names_a_missing_source(client):
@@ -547,7 +555,14 @@ def test_segment_without_a_segmenter_explains_how_to_install(client, monkeypatch
     monkeypatch.setenv("BONE_VIEWER_TOTALSEGMENTATOR", str(Path("does") / "not" / "exist"))
     monkeypatch.delenv("BONE_VIEWER_TOTALSEG_INFO", raising=False)
     series_uid = generate_uid()
-    source = upload_dicom(client, [("s.dcm", make_slice(0, series_uid, block=True))]).json()
+    # A real stack, or the flat-image refusal answers instead.
+    source = upload_dicom(
+        client,
+        [
+            ("a.dcm", make_slice(0, series_uid, block=True)),
+            ("b.dcm", make_slice(1, series_uid, block=True)),
+        ],
+    ).json()
 
     job = run_segment(client, source["source_id"])
     assert job["status"] == "failed"
